@@ -1,0 +1,28 @@
+[package]
+name = "woof_d"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+woof-capture = { path = "../../crates/woof-capture" }
+woof-core = { path = "../../crates/woof-core" }
+woof-llm = { path = "../../crates/woof-llm" }
+woof-search = { path = "../../crates/woof-search" }
+woof-storage = { path = "../../crates/woof-storage" }
+
+[dev-dependencies]
+tower.workspace = true

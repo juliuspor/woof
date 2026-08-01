@@ -1,0 +1,82 @@
+{
+  "bind": "127.0.0.1:3334",
+  "public": {
+    "GET /health": {
+      "status": 200,
+      "body": {"status": "ok"},
+      "body_encoding": "exact compact JSON",
+      "ownership_challenge": {
+        "request_header": "x-woof-health-challenge",
+        "challenge": "64 lowercase hexadecimal characters encoding 32 fresh random bytes",
+        "response_header": "x-woof-health-proof",
+        "proof": "lowercase hexadecimal HMAC-SHA256 keyed by the 64 ASCII bearer-token bytes over the decoded challenge bytes",
+        "without_valid_challenge": "the proof response header is absent"
+      }
+    }
+  },
+  "authentication": {
+    "scheme": "Bearer",
+    "token_file": "~/.woof/api-token",
+    "token_bytes": 64,
+    "comparison": "constant-time",
+    "applies_before_routing": true,
+    "failure_status": 401,
+    "failure_body": {"error": "Unauthorized"}
+  },
+  "authenticated_routes": [
+    "GET /capture/accessibility",
+    "GET /capture/blacklist",
+    "GET /capture/status",
+    "GET /chronicle",
+    "GET /chronicle/followups",
+    "GET /data/retention",
+    "GET /identity",
+    "GET /nudges/item",
+    "GET /nudges/ready-unseen",
+    "GET /preferences/nudges-enabled",
+    "GET /recent-activity",
+    "GET /rules",
+    "GET /search",
+    "GET /snapshots",
+    "GET /stats/overview",
+    "GET /time/report",
+    "GET /time/rules",
+    "GET /wiki/list",
+    "GET /wiki/page",
+    "GET /wiki/search",
+    "GET /work-patterns/status",
+    "GET /working-memory",
+    "POST /capture/accessibility/request",
+    "POST /capture/blacklist",
+    "POST /capture/pause",
+    "POST /capture/resume",
+    "POST /chat/record",
+    "POST /chronicle/followups/status",
+    "POST /data/delete-all",
+    "POST /identity/set-name",
+    "POST /inline-rewrite/record",
+    "POST /inline-rewrite/record-output",
+    "POST /inline-rewrite/similar-outputs",
+    "POST /nudges/dismiss",
+    "POST /nudges/mark-delivered",
+    "POST /nudges/mark-seen",
+    "POST /preferences/nudges-enabled",
+    "POST /rules",
+    "POST /rules/delete",
+    "POST /work-patterns/update",
+    "PUT /data/retention"
+  ],
+  "mcp_read_routes": [
+    "GET /search",
+    "GET /snapshots",
+    "GET /recent-activity",
+    "GET /working-memory",
+    "GET /chronicle",
+    "GET /wiki/list",
+    "GET /wiki/page",
+    "GET /wiki/search",
+    "GET /time/rules",
+    "GET /time/report"
+  ],
+  "maximum_request_body_bytes": 1048576
+}

@@ -1,0 +1,185 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "woof",
+  "version": "0.1.0",
+  "identifier": "com.julius.woof",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "companion-chat",
+        "title": "woof",
+        "url": "/?view=companion",
+        "width": 260,
+        "height": 32,
+        "minWidth": 260,
+        "minHeight": 32,
+        "maxWidth": 588,
+        "maxHeight": 440,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "acceptFirstMouse": true,
+        "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "memory-hub",
+        "title": "woof",
+        "url": "/?view=memory-hub",
+        "width": 1060,
+        "height": 720,
+        "minWidth": 880,
+        "minHeight": 620,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
+      },
+      {
+        "label": "onboarding",
+        "title": "woof",
+        "url": "/?view=onboarding",
+        "width": 920,
+        "height": 680,
+        "minWidth": 920,
+        "minHeight": 680,
+        "maxWidth": 920,
+        "maxHeight": 680,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": false
+      },
+      {
+        "label": "permission",
+        "title": "woof permissions",
+        "url": "/?view=permission",
+        "width": 480,
+        "height": 420,
+        "minWidth": 480,
+        "minHeight": 420,
+        "maxWidth": 480,
+        "maxHeight": 420,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": false
+      },
+      {
+        "label": "caret-overlay",
+        "title": "woof inline",
+        "url": "/?view=caret",
+        "width": 320,
+        "height": 68,
+        "minWidth": 320,
+        "minHeight": 68,
+        "maxWidth": 320,
+        "maxHeight": 68,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false,
+        "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "edit-mode",
+        "title": "Rewrite with woof",
+        "url": "/?view=edit",
+        "width": 440,
+        "height": 248,
+        "minWidth": 440,
+        "minHeight": 248,
+        "maxWidth": 440,
+        "maxHeight": 248,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false
+      },
+      {
+        "label": "health",
+        "title": "woof recovery",
+        "url": "/?view=health&state=offline",
+        "width": 420,
+        "height": 390,
+        "minWidth": 420,
+        "minHeight": 390,
+        "maxWidth": 420,
+        "maxHeight": 390,
+        "center": true,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": true,
+        "resizable": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' customprotocol: asset:; img-src 'self' asset: customprotocol: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost",
+      "capabilities": [
+        "companion",
+        "memory-hub",
+        "onboarding",
+        "permission",
+        "caret-overlay",
+        "edit-overlay",
+        "health"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app"],
+    "icon": ["icons/icon.png", "icons/icon.icns"],
+    "externalBin": ["binaries/woof_d", "binaries/woof-mcp"],
+    "resources": {
+      "../../../LICENSE": "LICENSE",
+      "../../../THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES"
+    },
+    "category": "Productivity",
+    "shortDescription": "A private local memory companion.",
+    "longDescription": "Woof notices visible work through macOS Accessibility, builds a local memory, and helps recall or rewrite with selected OpenAI context.",
+    "copyright": "Copyright © 2026 Julius",
+    "macOS": {
+      "minimumSystemVersion": "14.0",
+      "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist",
+      "hardenedRuntime": true
+    }
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["woof"]
+      }
+    }
+  }
+}

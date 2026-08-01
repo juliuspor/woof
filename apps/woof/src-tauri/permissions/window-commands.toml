@@ -1,0 +1,177 @@
+[[permission]]
+identifier = "appearance-read-commands"
+description = "Read-only appearance state used by every woof window."
+commands.allow = [
+  "get_reduce_visual_effects",
+]
+
+[[permission]]
+identifier = "settings-commands"
+description = "Commands used by the settings interface embedded in the companion and memory hub."
+commands.allow = [
+  "accessibility_trusted",
+  "capture_is_paused",
+  "capture_pause",
+  "capture_resume",
+  "clear_openai_api_key",
+  "companion_chat_get_collapsed_auto_hide",
+  "companion_chat_get_hover_open",
+  "companion_chat_get_position",
+  "companion_chat_set_collapsed_auto_hide",
+  "companion_chat_set_hover_open",
+  "companion_chat_set_position",
+  "daemon_health",
+  "get_api_key_status",
+  "get_capture_blacklist",
+  "get_caret_sounds_enabled",
+  "get_data_retention",
+  "get_default_woof_modifier_key",
+  "get_login_item_enabled",
+  "get_nudges_enabled",
+  "get_reduce_visual_effects",
+  "get_secondary_shortcut",
+  "get_secondary_shortcut_enabled",
+  "get_secondary_shortcut_error",
+  "get_transcription_modifier_key",
+  "get_voice_dictation_enabled",
+  "get_woof_modifier_enabled",
+  "get_woof_modifier_key",
+  "input_monitoring_trusted",
+  "load_contact_info",
+  "mcp_client_configuration",
+  "memory_delete_all",
+  "memory_identity_save",
+  "memory_working_memory",
+  "microphone_status",
+  "notification_open_settings",
+  "open_accessibility_settings",
+  "open_input_monitoring_settings",
+  "open_onboarding_window_cmd",
+  "record_modifier_key",
+  "record_secondary_shortcut",
+  "request_input_monitoring",
+  "save_contact_info",
+  "scheduled_reminder_create",
+  "scheduled_reminder_delete",
+  "scheduled_reminder_list",
+  "set_capture_blacklist",
+  "set_caret_sounds_enabled",
+  "set_data_retention",
+  "set_login_item_enabled",
+  "set_nudges_enabled",
+  "set_openai_api_key",
+  "set_reduce_visual_effects",
+  "set_secondary_shortcut",
+  "set_secondary_shortcut_enabled",
+  "set_transcription_modifier_key",
+  "set_voice_dictation_enabled",
+  "set_woof_modifier_enabled",
+  "set_woof_modifier_key",
+]
+
+[[permission]]
+identifier = "companion-commands"
+description = "Commands used by the compact companion, chat, nudges, and dictation controls."
+commands.allow = [
+  "capture_pause",
+  "capture_resume",
+  "chat_cancel",
+  "chat_send",
+  "companion_chat_drag_end",
+  "companion_chat_drag_frame",
+  "companion_chat_drag_start",
+  "companion_chat_get_collapsed_auto_hide",
+  "companion_chat_get_hover_open",
+  "companion_chat_get_position",
+  "companion_chat_open_focused",
+  "companion_chat_rollup",
+  "companion_chat_set_notification_active",
+  "companion_chat_set_nudge_card_active",
+  "companion_chat_set_state",
+  "companion_dismiss_nudge",
+  "companion_open_nudge",
+  "generate_chat_suggestions",
+  "memory_hub_open_route",
+  "memory_working_memory",
+  "transcription_cancel",
+  "transcription_finalize",
+  "transcription_start",
+]
+
+[[permission]]
+identifier = "memory-hub-commands"
+description = "Read and capture-control commands used by the memory hub."
+commands.allow = [
+  "capture_pause",
+  "capture_resume",
+  "capture_status",
+  "companion_chat_open_focused",
+  "memory_followups",
+  "memory_followup_set_status",
+  "memory_recent_activity",
+  "memory_time_report",
+  "memory_time_rules",
+  "memory_wiki_list",
+  "memory_wiki_page",
+  "memory_wiki_search",
+  "memory_work_pattern_set_status",
+  "memory_work_patterns",
+  "memory_working_memory",
+]
+
+[[permission]]
+identifier = "onboarding-commands"
+description = "Consent, permission, and credential commands used during onboarding."
+commands.allow = [
+  "accessibility_trusted",
+  "finish_onboarding",
+  "input_monitoring_trusted",
+  "microphone_status",
+  "open_input_monitoring_settings",
+  "request_accessibility",
+  "request_input_monitoring",
+  "set_openai_api_key",
+  "skip_onboarding_cmd",
+]
+
+[[permission]]
+identifier = "permission-commands"
+description = "Permission status and request commands used by the permission window."
+commands.allow = [
+  "accessibility_trusted",
+  "input_monitoring_trusted",
+  "microphone_status",
+  "open_input_monitoring_settings",
+  "request_accessibility",
+  "request_input_monitoring",
+]
+
+[[permission]]
+identifier = "caret-overlay-commands"
+description = "Commands used by the focused caret overlay."
+commands.allow = [
+  "caret_overlay_cancel",
+  "caret_overlay_ready",
+  "transcription_finalize",
+]
+
+[[permission]]
+identifier = "edit-overlay-commands"
+description = "Commands used by the focused inline edit overlay."
+commands.allow = [
+  "edit_mode_close",
+  "edit_mode_ready",
+  "edit_mode_set_content_height",
+  "edit_mode_set_glass_appearance",
+  "edit_mode_submit",
+  "transcription_cancel",
+]
+
+[[permission]]
+identifier = "health-commands"
+description = "Recovery commands used by the health window."
+commands.allow = [
+  "capture_status",
+  "daemon_health",
+  "open_accessibility_settings",
+]

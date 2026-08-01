@@ -1,0 +1,133 @@
+{
+  "bind": "127.0.0.1:3334",
+  "public": {
+    "GET /health": {
+      "status": 200,
+      "body": {"status": "ok"},
+      "body_encoding": "exact compact JSON",
+      "ownership_challenge": {
+        "request_header": "x-woof-health-challenge",
+        "challenge_bytes": 32,
+        "challenge_encoding": "lowercase hexadecimal",
+        "response_header": "x-woof-health-proof",
+        "proof_algorithm": "HMAC-SHA256",
+        "proof_key": "64 ASCII bytes from ~/.woof/api-token",
+        "proof_message": "decoded challenge bytes",
+        "proof_encoding": "lowercase hexadecimal",
+        "without_valid_challenge": "the proof response header is absent"
+      }
+    }
+  },
+  "authentication": {
+    "scheme": "Bearer",
+    "token_file": "~/.woof/api-token",
+    "token_bytes": 64,
+    "comparison": "constant-time",
+    "before_routing": true,
+    "failure": {
+      "status": 401,
+      "body": {"error": "Unauthorized"}
+    }
+  },
+  "authenticated_routes": [
+    "GET /capture/accessibility",
+    "GET /capture/blacklist",
+    "GET /capture/status",
+    "GET /chronicle",
+    "GET /chronicle/followups",
+    "GET /data/retention",
+    "GET /identity",
+    "GET /nudges/item",
+    "GET /nudges/ready-unseen",
+    "GET /preferences/nudges-enabled",
+    "GET /recent-activity",
+    "GET /rules",
+    "GET /search",
+    "GET /snapshots",
+    "GET /stats/overview",
+    "GET /time/report",
+    "GET /time/rules",
+    "GET /wiki/list",
+    "GET /wiki/page",
+    "GET /wiki/search",
+    "GET /work-patterns/status",
+    "GET /working-memory",
+    "POST /capture/accessibility/request",
+    "POST /capture/blacklist",
+    "POST /capture/pause",
+    "POST /capture/resume",
+    "POST /chat/record",
+    "POST /chronicle/followups/status",
+    "POST /data/delete-all",
+    "POST /identity/set-name",
+    "POST /inline-rewrite/record",
+    "POST /inline-rewrite/record-output",
+    "POST /inline-rewrite/similar-outputs",
+    "POST /nudges/dismiss",
+    "POST /nudges/mark-delivered",
+    "POST /nudges/mark-seen",
+    "POST /preferences/nudges-enabled",
+    "POST /rules",
+    "POST /rules/delete",
+    "POST /work-patterns/update",
+    "PUT /data/retention"
+  ],
+  "route_groups": {
+    "mcp_read_only": [
+      "GET /search",
+      "GET /snapshots",
+      "GET /recent-activity",
+      "GET /working-memory",
+      "GET /chronicle",
+      "GET /wiki/list",
+      "GET /wiki/page",
+      "GET /wiki/search",
+      "GET /time/rules",
+      "GET /time/report"
+    ],
+    "memory_views": [
+      "GET /chronicle/followups",
+      "POST /chronicle/followups/status",
+      "GET /stats/overview",
+      "GET /work-patterns/status",
+      "POST /work-patterns/update"
+    ],
+    "capture_controls": [
+      "GET /capture/accessibility",
+      "POST /capture/accessibility/request",
+      "GET /capture/status",
+      "POST /capture/pause",
+      "POST /capture/resume",
+      "GET /capture/blacklist",
+      "POST /capture/blacklist"
+    ],
+    "identity": [
+      "GET /identity",
+      "POST /identity/set-name"
+    ],
+    "reminders_and_notifications": [
+      "GET /nudges/item",
+      "GET /nudges/ready-unseen",
+      "POST /nudges/dismiss",
+      "POST /nudges/mark-delivered",
+      "POST /nudges/mark-seen",
+      "GET /rules",
+      "POST /rules",
+      "POST /rules/delete",
+      "GET /preferences/nudges-enabled",
+      "POST /preferences/nudges-enabled"
+    ],
+    "data_controls": [
+      "GET /data/retention",
+      "PUT /data/retention",
+      "POST /data/delete-all"
+    ],
+    "chat_and_inline": [
+      "POST /chat/record",
+      "POST /inline-rewrite/record",
+      "POST /inline-rewrite/record-output",
+      "POST /inline-rewrite/similar-outputs"
+    ]
+  },
+  "maximum_request_body_bytes": 1048576
+}

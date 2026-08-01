@@ -1,0 +1,33 @@
+[
+  {
+    "type": "conversation.item.input_audio_transcription.delta",
+    "event_id": "event_delta_1",
+    "item_id": "item_003",
+    "content_index": 0,
+    "delta": "Hello,"
+  },
+  {
+    "type": "conversation.item.input_audio_transcription.delta",
+    "event_id": "event_delta_2",
+    "item_id": "item_003",
+    "content_index": 0,
+    "delta": " how are you?"
+  },
+  {
+    "type": "conversation.item.input_audio_transcription.completed",
+    "event_id": "event_completed_1",
+    "item_id": "item_003",
+    "content_index": 0,
+    "transcript": "Hello, how are you?",
+    "usage": {
+      "type": "tokens",
+      "total_tokens": 22,
+      "input_tokens": 13,
+      "input_token_details": {
+        "text_tokens": 0,
+        "audio_tokens": 13
+      },
+      "output_tokens": 9
+    }
+  }
+]

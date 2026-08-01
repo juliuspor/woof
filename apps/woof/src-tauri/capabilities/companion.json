@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "companion",
+  "description": "woof companion and settings commands",
+  "windows": ["companion-chat"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "appearance-read-commands",
+    "companion-commands",
+    "settings-commands"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "caret-overlay",
+  "description": "woof caret overlay commands",
+  "windows": ["caret-overlay"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "appearance-read-commands",
+    "caret-overlay-commands"
+  ]
+}

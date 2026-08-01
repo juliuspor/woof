@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "memory-hub",
+  "description": "woof memory hub and settings commands",
+  "windows": ["memory-hub"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "appearance-read-commands",
+    "memory-hub-commands",
+    "settings-commands"
+  ]
+}

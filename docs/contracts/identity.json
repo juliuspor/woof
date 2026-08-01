@@ -1,0 +1,22 @@
+{
+  "product": "woof",
+  "version": "0.1.0",
+  "bundle_id": "com.julius.woof",
+  "url_scheme": "woof",
+  "daemon_name": "woof_d",
+  "daemon_bundle_id": "com.julius.woof.daemon",
+  "daemon_bundle_name": "woof daemon",
+  "mcp_name": "woof-mcp",
+  "mcp_bundle_id": "com.julius.woof.mcp",
+  "mcp_bundle_name": "woof mcp",
+  "mcp_server_name": "woof",
+  "mcp_protocol": "2025-11-25",
+  "bind": "127.0.0.1:3334",
+  "keychain_service": "com.julius.woof.openai",
+  "signing_identity_class": "Developer ID Application",
+  "hardened_runtime": true,
+  "secure_timestamp": true,
+  "notarization": "required",
+  "stapled_ticket": true,
+  "architecture": "aarch64-apple-darwin"
+}

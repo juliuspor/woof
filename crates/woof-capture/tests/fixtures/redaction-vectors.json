@@ -1,0 +1,107 @@
+[
+  {
+    "name": "email",
+    "input": "Contact p.privacy+test@example.co.uk now.",
+    "expected": "Contact [REDACTED_EMAIL] now."
+  },
+  {
+    "name": "visa",
+    "input": "Card 4111-1111-1111-1111",
+    "expected": "Card [REDACTED_CARD]"
+  },
+  {
+    "name": "iban",
+    "input": "IBAN GB82 WEST 1234 5698 7654 32",
+    "expected": "IBAN [REDACTED_IBAN]"
+  },
+  {
+    "name": "ssn",
+    "input": "SSN 123-45-6789",
+    "expected": "SSN [REDACTED_SSN]"
+  },
+  {
+    "name": "cvv",
+    "input": "CVC = 456",
+    "expected": "CVC = [REDACTED_CVV]"
+  },
+  {
+    "name": "phone",
+    "input": "Call (415) 555-2671",
+    "expected": "Call [REDACTED_PHONE]"
+  },
+  {
+    "name": "authorization bearer",
+    "input": "Authorization: Bearer AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+    "expected": "Authorization: Bearer [REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "OpenAI token prefix",
+    "input": "key sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+    "expected": "key [REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "GitHub token prefix",
+    "input": "token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+    "expected": "token [REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "Slack app token prefix",
+    "input": "token xapp-1-AbCdEfGhIjKlMnOpQrStUvWxYz012345",
+    "expected": "token [REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "AWS labeled secret",
+    "input": "AWS_SECRET_ACCESS_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz0123456789ABCD",
+    "expected": "AWS_SECRET_ACCESS_KEY=[REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "quoted client secret",
+    "input": "\"client_secret\": \"AbCdEfGhIjKlMnOpQrStUvWxYz987654\"",
+    "expected": "\"client_secret\": \"[REDACTED_CREDENTIAL]\""
+  },
+  {
+    "name": "quoted password passphrase",
+    "input": "password=\"correct horse battery staple\"",
+    "expected": "password=\"[REDACTED_CREDENTIAL]\""
+  },
+  {
+    "name": "repeated labeled secret",
+    "input": "api_key=aaaaaaaaaaaa",
+    "expected": "api_key=[REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "JWT",
+    "input": "JWT eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJmaXh0dXJlIn0.ZmFrZXNpZ25hdHVyZQ",
+    "expected": "JWT [REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "PEM private key",
+    "input": "-----BEGIN PRIVATE KEY-----\nU1lOVEhFVElDX0ZJWFRVUkVfTk9UX0FfS0VZ\n-----END PRIVATE KEY-----",
+    "expected": "[REDACTED_CREDENTIAL]"
+  },
+  {
+    "name": "short provider placeholders remain",
+    "input": "Examples sk-example and ghp_example",
+    "expected": "Examples sk-example and ghp_example"
+  },
+  {
+    "name": "labeled placeholder remains",
+    "input": "api_key=your_api_key_here",
+    "expected": "api_key=your_api_key_here"
+  },
+  {
+    "name": "password placeholder remains",
+    "input": "password=your_password_here",
+    "expected": "password=your_password_here"
+  },
+  {
+    "name": "authorization prose remains",
+    "input": "Authorization: Bearer authentication is required",
+    "expected": "Authorization: Bearer authentication is required"
+  },
+  {
+    "name": "public key remains",
+    "input": "-----BEGIN PUBLIC KEY-----\nU1lOVEhFVElD\n-----END PUBLIC KEY-----",
+    "expected": "-----BEGIN PUBLIC KEY-----\nU1lOVEhFVElD\n-----END PUBLIC KEY-----"
+  }
+]

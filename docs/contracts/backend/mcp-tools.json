@@ -1,0 +1,194 @@
+[
+  {
+    "name": "search_memory",
+    "description": "Search locally stored activity text. Results contain ranked snapshot metadata and short excerpts. Use get_snapshots when an answer depends on exact wording or details beyond an excerpt.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Two to four distinctive search terms; non-empty, no control characters, at most 1024 UTF-8 bytes."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 20,
+          "minimum": 1,
+          "maximum": 30,
+          "description": "Maximum result count."
+        }
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_chronicle",
+    "description": "Return a generated activity summary for an hour, day, week, month, or year. Use snapshots when exact source wording is required.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "level": {
+          "type": "string",
+          "enum": ["hour", "day", "week", "month", "year"]
+        },
+        "period": {
+          "type": "string",
+          "description": "Period key matching the selected level; non-empty, no control characters, at most 64 UTF-8 bytes."
+        }
+      },
+      "required": ["level", "period"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_working_memory",
+    "description": "Return the newest active snapshots from the bounded local working set, including full captured content and focused-element context.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer",
+          "default": 40,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of snapshots."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_recent_activity",
+    "description": "Return a chronological index of foreground activity from the immediate look-back window. Fetch a snapshot when its excerpt is insufficient.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "minutes": {
+          "type": "integer",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 360,
+          "description": "Look-back window in minutes."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 12,
+          "minimum": 1,
+          "maximum": 20,
+          "description": "Maximum result count."
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_snapshots",
+    "description": "Fetch full captured content and metadata for specific snapshot identifiers.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "ids": {
+          "type": "array",
+          "items": {"type": "string"},
+          "maxItems": 100,
+          "description": "Snapshot identifiers returned by another activity tool. Each must be non-empty, contain no control character or comma, and use at most 128 UTF-8 bytes; the encoded list may use at most 8192 bytes."
+        }
+      },
+      "required": ["ids"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "search_wiki",
+    "description": "Search locally generated pages about people, projects, topics, tools, and organizations.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Entity name or topic; non-empty, no control characters, at most 1024 UTF-8 bytes."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 10,
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Maximum number of pages."
+        }
+      },
+      "required": ["query"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_wiki_page",
+    "description": "Fetch one locally generated wiki page, its related links, and the snapshot identifiers supporting it.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "slug": {
+          "type": "string",
+          "description": "Page slug or entity name; non-empty, no control characters, at most 256 UTF-8 bytes."
+        }
+      },
+      "required": ["slug"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_wiki",
+    "description": "List local wiki pages, optionally filtered by page type.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["person", "project", "topic", "tool", "org"],
+          "description": "Optional page-type filter."
+        },
+        "limit": {
+          "type": "integer",
+          "default": 50,
+          "minimum": 1,
+          "maximum": 200,
+          "description": "Maximum number of pages."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "get_time_report",
+    "description": "Return locally calculated foreground-time totals and project classifications for a named period or inclusive date range.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "period": {
+          "type": "string",
+          "enum": ["today", "yesterday", "this_week", "last_week", "this_month", "last_7_days", "last_30_days"],
+          "description": "Named period in local time."
+        },
+        "from": {
+          "type": "string",
+          "description": "Inclusive start date in YYYY-MM-DD format; at most 32 UTF-8 bytes."
+        },
+        "to": {
+          "type": "string",
+          "description": "Inclusive end date in YYYY-MM-DD format; at most 32 UTF-8 bytes."
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "list_time_rules",
+    "description": "List time-classification rules with their identifiers, match fields, projects, and sources.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    }
+  }
+]

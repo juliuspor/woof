@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "permission",
+  "description": "woof permission window commands",
+  "windows": ["permission"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "appearance-read-commands",
+    "permission-commands"
+  ]
+}

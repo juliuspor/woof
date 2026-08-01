@@ -1,0 +1,38 @@
+{
+  "name": "woof-desktop",
+  "version": "0.1.0",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "tauri": "tauri",
+    "tauri:dev": "../../scripts/stage-sidecars.sh debug && tauri dev",
+    "tauri:build": "../../scripts/stage-sidecars.sh debug && npm run tauri:build:pre-staged",
+    "tauri:build:pre-staged": "tauri build --target aarch64-apple-darwin"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.2.8",
+    "@tauri-apps/api": "2.8.0",
+    "lucide-svelte": "0.468.0",
+    "svelte": "5.56.8"
+  },
+  "devDependencies": {
+    "@sveltejs/adapter-static": "3.0.9",
+    "@sveltejs/kit": "2.70.2",
+    "@sveltejs/vite-plugin-svelte": "7.2.0",
+    "@tauri-apps/cli": "2.10.1",
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/svelte": "5.2.8",
+    "@types/node": "22.15.30",
+    "jsdom": "26.1.0",
+    "svelte-check": "4.3.4",
+    "typescript": "5.8.3",
+    "vite": "8.2.0",
+    "vitest": "4.1.10"
+  }
+}

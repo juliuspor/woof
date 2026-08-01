@@ -1,0 +1,71 @@
+[workspace]
+members = [
+  "crates/woof-core",
+  "crates/woof-storage",
+  "crates/woof-capture",
+  "crates/woof-llm",
+  "crates/woof-audio",
+  "crates/woof-inline",
+  "crates/woof-search",
+  "apps/woof_d",
+  "apps/woof-mcp",
+  "apps/woof/src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+authors = ["Julius"]
+
+[workspace.dependencies]
+async-trait = "=0.1.88"
+axum = { version = "=0.8.4", default-features = false, features = ["http1", "json", "query", "tokio"] }
+base64 = "=0.22.1"
+bytes = "=1.11.1"
+chrono = { version = "=0.4.44", features = ["clock", "serde"] }
+cpal = "=0.16.0"
+dirs = "=6.0.0"
+futures-util = "=0.3.31"
+global-hotkey = "=0.7.0"
+hex = "=0.4.3"
+keyring = { version = "=3.6.3", features = ["apple-native"] }
+libc = "=0.2.189"
+rand = "=0.9.3"
+regex = "=1.11.1"
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "stream"] }
+rusqlite = { version = "=0.31.0", features = ["chrono", "modern_sqlite"] }
+secrecy = { version = "=0.10.3", features = ["serde"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+sha2 = "=0.10.9"
+subtle = "=2.6.1"
+tao = "=0.34.8"
+tauri-runtime = "=2.10.1"
+tauri-runtime-wry = "=2.10.1"
+thiserror = "=2.0.12"
+tokio = { version = "=1.52.1", features = ["full"] }
+tokio-stream = "=0.1.17"
+tokio-tungstenite = { version = "=0.27.0", features = ["native-tls"] }
+tower = { version = "=0.5.2", features = ["util"] }
+tower-http = { version = "=0.6.8", features = ["catch-panic", "limit"] }
+tracing = "=0.1.41"
+tracing-subscriber = { version = "=0.3.20", features = ["env-filter", "fmt"] }
+url = { version = "=2.5.4", features = ["serde"] }
+usearch = "=2.25.1"
+uuid = { version = "=1.23.1", features = ["serde", "v4", "v7"] }
+window-vibrancy = "=0.6.0"
+wry = "=0.54.4"
+zeroize = "=1.8.1"
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3
+panic = "abort"
+strip = "symbols"
+
+[patch.crates-io]
+wry = { path = "vendor/wry" }
