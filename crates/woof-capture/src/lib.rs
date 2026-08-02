@@ -19,8 +19,9 @@ pub use engine::{
     SnapshotCandidate,
 };
 pub use model::{
-    capture_after_preflight, AccessibilityNode, AccessibilityProvider, CaptureError,
-    CaptureMetadata, ForegroundCapture, RawCapture,
+    capture_after_preflight, capture_contextual_reply_after_surface_preflight,
+    validate_capture_target, AccessibilityNode, AccessibilityProvider, AccessibilityRect,
+    CaptureError, CaptureMetadata, ForegroundCapture, RawCapture,
 };
 pub use policy::{BlacklistKind, BlacklistRule, CapturePolicy};
 pub use redact::{

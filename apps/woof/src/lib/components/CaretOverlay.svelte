@@ -5,8 +5,10 @@
   import {
     COMMANDS,
     EVENTS,
+    type CaretFadeoutPayload,
     type CaretInitPayload,
     type CaretStatusPayload,
+    type InlineRefusedPayload,
     type TranscriptionLevelPayload,
     transcriptionLevelFromPayload
   } from "$lib/contracts/ipc";
@@ -39,7 +41,14 @@
     const listeners = [
       listenEvent<CaretInitPayload>(EVENTS.caretInit, (payload) => {
         if (!Number.isSafeInteger(payload?.session_id) || payload.session_id <= 0) return;
+        if (sessionId > 0 && payload.session_id < sessionId) return;
+        const newSession = payload.session_id !== sessionId;
         sessionId = payload.session_id;
+        if (newSession) {
+          mode = "prompt";
+          level = 0.28;
+          title = "What should I change?";
+        }
         detail = payload.status || "Selection ready";
         leaving = false;
         visible = true;
@@ -76,17 +85,23 @@
         title = "Finishing dictation…";
         detail = "The recording limit was reached";
       }),
-      listenEvent<{ reason?: string }>(EVENTS.inlineRefused, (payload) => {
+      listenEvent<InlineRefusedPayload>(EVENTS.inlineRefused, (payload) => {
+        if (payload?.session_id !== undefined && payload.session_id !== sessionId) return;
         const reason = payload?.reason ?? "";
         showError(
           reason === "secure-input"
             ? "Secure keyboard input is active."
-            : reason === "permission-denied"
+            : reason === "permission-denied" || reason === "accessibility-permission"
               ? "Accessibility and Input Monitoring are required."
+              : reason === "delivery-unconfirmed"
+                ? "Couldn’t confirm the draft was inserted. Review the composer before retrying."
+              : reason === "delivery-failed"
+                ? "Couldn’t insert the draft. The chat was left untouched."
               : "The focused text is protected or unavailable."
         );
       }),
-      listenEvent(EVENTS.caretFadeout, () => {
+      listenEvent<CaretFadeoutPayload>(EVENTS.caretFadeout, (payload) => {
+        if (payload?.session_id !== sessionId) return;
         leaving = true;
         visible = false;
       })

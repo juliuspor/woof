@@ -18,6 +18,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 woof-capture = { path = "../../crates/woof-capture" }
 woof-core = { path = "../../crates/woof-core" }
 woof-llm = { path = "../../crates/woof-llm" }

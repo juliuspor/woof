@@ -15,14 +15,15 @@ use objc2_foundation::NSString;
 
 use crate::{
     replace_utf16_range, slice_utf16_range, DeliveryFocus, FallbackTarget, FocusedElementMetadata,
-    FocusedTextTarget, InlineError, InlineRead, Rect, ReplacementAttempt, TextScope, Utf16Range,
-    WakeHint,
+    FocusedTextTarget, InlineError, InlineRead, PreviewWriteError, Rect, ReplacementAttempt,
+    TextScope, Utf16Range, WakeHint,
 };
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
 type CFAttributedStringRef = *const c_void;
 type CFURLRef = *const c_void;
+type CFNumberRef = *const c_void;
 type CFTypeId = usize;
 type CFIndex = isize;
 type AXUIElementRef = *const c_void;
@@ -40,8 +41,11 @@ const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const AX_VALUE_CGRECT: i32 = 3;
 const AX_VALUE_CFRANGE: i32 = 4;
+const CF_NUMBER_SINT64_TYPE: i32 = 4;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_OPERATION_STRING_ALLOCATION_BYTES: usize = MAX_TEXT_BYTES + 1;
+const DELIVERY_CONFIRMATION_ATTEMPTS: usize = 8;
+const DELIVERY_CONFIRMATION_DELAY: Duration = Duration::from_millis(15);
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -127,6 +131,8 @@ unsafe extern "C" {
     fn CFURLGetString(value: CFURLRef) -> CFStringRef;
     fn CFBooleanGetTypeID() -> CFTypeId;
     fn CFBooleanGetValue(value: CFTypeRef) -> bool;
+    fn CFNumberGetTypeID() -> CFTypeId;
+    fn CFNumberGetValue(number: CFNumberRef, number_type: i32, value: *mut c_void) -> bool;
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -213,9 +219,19 @@ impl MacOsFocusedTarget {
             subrole.as_deref(),
             copy_bool(refs.element.0, "AXEditable")? == Some(true),
         );
+        let window_title = match refs.window.as_ref() {
+            Some(window) => copy_text(window.0, "AXTitle", string_budget)?,
+            None => None,
+        };
+        let window_id = match refs.window.as_ref() {
+            Some(window) => copy_positive_i64(window.0, "AXWindowNumber")?,
+            None => None,
+        };
         Ok(FocusedElementMetadata {
             pid: refs.pid,
             bundle_id: running_application_bundle_id(refs.pid, string_budget)?,
+            window_title,
+            window_id,
             role,
             subrole,
             title,
@@ -286,6 +302,27 @@ impl MacOsFocusedTarget {
         } else {
             Err(InlineError::TargetFocusChanged)
         }
+    }
+
+    fn ensure_controller_focus(&self, controller_pid: i32) -> Result<(), InlineError> {
+        ensure_accessibility_safe()?;
+        let refs = self.refs()?;
+        if controller_pid <= 0 || controller_pid == refs.pid {
+            return Err(InlineError::TargetFocusChanged);
+        }
+
+        let system = OwnedAx::new(unsafe { AXUIElementCreateSystemWide() as CFTypeRef })
+            .ok_or(InlineError::TargetFocusChanged)?;
+        let application = copy_element(system.0, "AXFocusedApplication")?
+            .ok_or(InlineError::TargetFocusChanged)?;
+        let mut pid = 0;
+        // SAFETY: `application` is retained and `pid` is writable.
+        if unsafe { AXUIElementGetPid(application.0, &mut pid) } != AX_ERROR_SUCCESS
+            || pid != controller_pid
+        {
+            return Err(InlineError::TargetFocusChanged);
+        }
+        Ok(())
     }
 
     fn validate_revision(
@@ -383,6 +420,86 @@ impl MacOsFocusedTarget {
         set_attribute(refs.element.0, attribute, value.0)
     }
 
+    fn set_whole_draft_accessibility(
+        &self,
+        expected: &InlineRead,
+        replacement: &str,
+    ) -> Result<(), InlineError> {
+        if expected.scope != TextScope::WholeDraft {
+            return Err(InlineError::NotWritable);
+        }
+        let refs = self.refs()?;
+        if expected.metadata.value_writable && is_settable(refs.element.0, "AXValue")? {
+            self.set_text("AXValue", replacement)?;
+        } else if expected.metadata.selected_text_writable
+            && is_settable(refs.element.0, "AXSelectedTextRange")?
+        {
+            set_range(
+                refs.element.0,
+                "AXSelectedTextRange",
+                Utf16Range {
+                    location: 0,
+                    length: expected.text.encode_utf16().count(),
+                },
+            )?;
+            self.set_text("AXSelectedText", replacement)?;
+        } else {
+            return Err(InlineError::NotWritable);
+        }
+
+        if is_settable(refs.element.0, "AXSelectedTextRange")? {
+            let _ = set_range(
+                refs.element.0,
+                "AXSelectedTextRange",
+                Utf16Range {
+                    location: replacement.encode_utf16().count(),
+                    length: 0,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    fn ensure_whole_draft_accessibility_writable(
+        &self,
+        expected: &InlineRead,
+    ) -> Result<(), InlineError> {
+        if expected.scope != TextScope::WholeDraft {
+            return Err(InlineError::NotWritable);
+        }
+        let refs = self.refs()?;
+        if expected.metadata.value_writable && is_settable(refs.element.0, "AXValue")? {
+            return Ok(());
+        }
+        if expected.metadata.selected_text_writable
+            && is_settable(refs.element.0, "AXSelectedText")?
+            && is_settable(refs.element.0, "AXSelectedTextRange")?
+        {
+            return Ok(());
+        }
+        Err(InlineError::NotWritable)
+    }
+
+    fn confirmed_whole_draft_read(&self, replacement: &str) -> Result<InlineRead, InlineError> {
+        for attempt in 0..DELIVERY_CONFIRMATION_ATTEMPTS {
+            let mut string_budget = AxStringBudget::default();
+            match self.current_read(TextScope::WholeDraft, &mut string_budget) {
+                Ok(observed) if observed.text == replacement => return Ok(observed),
+                Err(
+                    error @ (InlineError::PermissionDenied
+                    | InlineError::SecureInput
+                    | InlineError::ProtectedContent
+                    | InlineError::Released),
+                ) => return Err(error),
+                Ok(_) | Err(_) => {}
+            }
+            if attempt + 1 < DELIVERY_CONFIRMATION_ATTEMPTS {
+                thread::sleep(DELIVERY_CONFIRMATION_DELAY);
+            }
+        }
+        Err(InlineError::DeliveryUnconfirmed)
+    }
+
     fn replace_value_range(
         &self,
         expected_value: &str,
@@ -428,6 +545,10 @@ impl FocusedTextTarget for MacOsFocusedTarget {
         self.validate_revision(expected, focus, &mut string_budget)
     }
 
+    fn validate_controller_focus(&self, controller_pid: i32) -> Result<(), InlineError> {
+        self.ensure_controller_focus(controller_pid)
+    }
+
     fn replace(
         &mut self,
         expected: &InlineRead,
@@ -461,6 +582,94 @@ impl FocusedTextTarget for MacOsFocusedTarget {
             }
             _ => Ok(ReplacementAttempt::Unavailable),
         }
+    }
+
+    fn replace_whole_draft_preview(
+        &mut self,
+        expected_text: &str,
+        replacement: &str,
+        controller_pid: i32,
+    ) -> Result<InlineRead, PreviewWriteError> {
+        self.ensure_controller_focus(controller_pid)
+            .map_err(PreviewWriteError::before_write)?;
+        let mut string_budget = AxStringBudget::default();
+        let current = self
+            .current_read(TextScope::WholeDraft, &mut string_budget)
+            .map_err(PreviewWriteError::before_write)?;
+        if current.text != expected_text {
+            return Err(PreviewWriteError::before_write(
+                InlineError::TargetContentChanged,
+            ));
+        }
+
+        // Keep the temporary text unreachable by foreground keyboard input
+        // through the write itself. The retained element is mutated through
+        // Accessibility only; preview updates never use clipboard or injected
+        // key events and never raise the target application.
+        self.ensure_controller_focus(controller_pid)
+            .map_err(PreviewWriteError::before_write)?;
+        self.ensure_whole_draft_accessibility_writable(&current)
+            .map_err(PreviewWriteError::before_write)?;
+        self.set_whole_draft_accessibility(&current, replacement)
+            .map_err(PreviewWriteError::after_write_started)?;
+        self.confirmed_whole_draft_read(replacement)
+            .map_err(PreviewWriteError::after_write_started)
+    }
+
+    fn restore_whole_draft_preview(
+        &mut self,
+        expected_previews: &[&str],
+        original: &InlineRead,
+        controller_pid: i32,
+    ) -> Result<InlineRead, InlineError> {
+        if original.scope != TextScope::WholeDraft {
+            return Err(InlineError::NotWritable);
+        }
+        let mut string_budget = AxStringBudget::default();
+        self.ensure_target_safe(&mut string_budget)?;
+        let current = self.current_read(TextScope::WholeDraft, &mut string_budget)?;
+        if current.text == original.text {
+            return Ok(current);
+        }
+        if !expected_previews
+            .iter()
+            .any(|preview| current.text == *preview)
+        {
+            return Err(InlineError::TargetContentChanged);
+        }
+
+        // Cleanup mutates the composer only while woof's controller still
+        // owns foreground keyboard focus. If the user has returned to the
+        // composer, leaving a marker is safer than racing their keystrokes.
+        self.ensure_controller_focus(controller_pid)?;
+        let mut recheck_budget = AxStringBudget::default();
+        let current = self.current_read(TextScope::WholeDraft, &mut recheck_budget)?;
+        if current.text == original.text {
+            return Ok(current);
+        }
+        if !expected_previews
+            .iter()
+            .any(|preview| current.text == *preview)
+        {
+            return Err(InlineError::TargetContentChanged);
+        }
+        self.ensure_controller_focus(controller_pid)?;
+        self.set_whole_draft_accessibility(&current, &original.text)?;
+        self.confirmed_whole_draft_read(&original.text)?;
+
+        if let Some(selection) = original.selection {
+            let refs = self.refs()?;
+            if is_settable(refs.element.0, "AXSelectedTextRange")? {
+                set_range(refs.element.0, "AXSelectedTextRange", selection)?;
+            }
+        }
+
+        let mut final_budget = AxStringBudget::default();
+        let restored = self.current_read(TextScope::WholeDraft, &mut final_budget)?;
+        if restored.text != original.text {
+            return Err(InlineError::DeliveryUnconfirmed);
+        }
+        Ok(restored)
     }
 
     fn prepare_fallback(
@@ -498,6 +707,10 @@ impl FocusedTextTarget for MacOsFocusedTarget {
     ) -> Result<(), InlineError> {
         let mut string_budget = AxStringBudget::default();
         self.validate_prepared_fallback(expected, fallback, &mut string_budget)
+    }
+
+    fn confirm_whole_draft(&self, replacement: &str) -> Result<(), InlineError> {
+        self.confirmed_whole_draft_read(replacement).map(|_| ())
     }
 
     fn release(&mut self) {
@@ -624,6 +837,29 @@ fn copy_bool(element: AXUIElementRef, attribute: &str) -> Result<Option<bool>, I
     // SAFETY: Type is checked before the CFBoolean read.
     unsafe {
         Ok((CFGetTypeID(value.0) == CFBooleanGetTypeID()).then(|| CFBooleanGetValue(value.0)))
+    }
+}
+
+fn copy_positive_i64(element: AXUIElementRef, attribute: &str) -> Result<Option<i64>, InlineError> {
+    let Some(value) = copy_attribute(element, attribute)? else {
+        return Ok(None);
+    };
+    // SAFETY: Type identity is checked before CFNumber copies a signed 64-bit
+    // value into correctly aligned Rust storage. AX window numbers are valid
+    // identities only when strictly positive.
+    unsafe {
+        if CFGetTypeID(value.0) != CFNumberGetTypeID() {
+            return Ok(None);
+        }
+        let mut output = 0_i64;
+        if !CFNumberGetValue(
+            value.0 as CFNumberRef,
+            CF_NUMBER_SINT64_TYPE,
+            ptr::addr_of_mut!(output).cast(),
+        ) {
+            return Ok(None);
+        }
+        Ok((output > 0).then_some(output))
     }
 }
 

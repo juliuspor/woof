@@ -471,14 +471,85 @@ describe("desktop surfaces", () => {
     expect(invoke).toHaveBeenCalledWith(COMMANDS.caretCancel, { sessionId: 7 });
   });
 
-  it("implements edit init focus, idle close, inert blank submit, and transcription fallback", async () => {
+  it("resets a newer caret session and ignores stale init and fade events", async () => {
+    const view = render(CaretOverlay);
+    await waitFor(() =>
+      expect(screen.getByText("What should I change?")).toBeInTheDocument()
+    );
+    const overlay = view.container.querySelector("main");
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretInit, {
+        detail: { session_id: 70, status: "Selection ready" }
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.inlineRefused, {
+        detail: { session_id: 70, reason: "focus-unavailable" }
+      })
+    );
+    expect(await screen.findByText("Couldn’t continue")).toBeInTheDocument();
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretInit, {
+        detail: { session_id: 71, status: "Reading this chat…" }
+      })
+    );
+    expect(await screen.findByText("What should I change?")).toBeInTheDocument();
+    expect(screen.getByText("Reading this chat…")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn’t continue")).not.toBeInTheDocument();
+    expect(overlay).toHaveClass("visible");
+    expect(overlay).not.toHaveClass("error");
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.inlineRefused, {
+        detail: { session_id: 71, reason: "delivery-unconfirmed" }
+      })
+    );
+    expect(
+      await screen.findByText(
+        "Couldn’t confirm the draft was inserted. Review the composer before retrying."
+      )
+    ).toBeInTheDocument();
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretInit, {
+        detail: { session_id: 70, status: "stale init" }
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretFadeout, { detail: { session_id: 70 } })
+    );
+    expect(screen.queryByText("stale init")).not.toBeInTheDocument();
+    expect(overlay).toHaveClass("visible");
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretFadeout, { detail: { session_id: 71 } })
+    );
+    await waitFor(() => expect(overlay).not.toHaveClass("visible"));
+  });
+
+  it("implements rewrite focus, idle close, inert blank submit, and transcription fallback", async () => {
     vi.useFakeTimers();
     const invoke = vi.spyOn(bridge, "invokeCommand");
     render(EditOverlay);
     await vi.advanceTimersByTimeAsync(0);
     expect(invoke).toHaveBeenCalledWith(COMMANDS.editReady);
 
-    window.dispatchEvent(new CustomEvent(EVENTS.editInit, { detail: { glass: true } }));
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: {
+          glass: true,
+          session_id: 1,
+          mode: "selection",
+          context_state: "unavailable",
+          context_reason: "Recent context could not be read."
+        }
+      })
+    );
+    expect(screen.getByText("Rewrite selection")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Selection" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Whole draft" })).not.toBeInTheDocument();
     const editor = screen.getByRole("textbox", { name: "Rewrite instruction" });
     await vi.advanceTimersByTimeAsync(59);
     expect(editor).not.toHaveFocus();
@@ -505,9 +576,166 @@ describe("desktop surfaces", () => {
     await fireEvent.keyDown(editor, { key: "Enter" });
     expect(invoke).toHaveBeenCalledTimes(callsBeforeBlankSubmit);
 
-    window.dispatchEvent(new CustomEvent(EVENTS.editInit, { detail: {} }));
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: {
+          session_id: 2,
+          mode: "draft",
+          context_state: "available"
+        }
+      })
+    );
+    expect(await screen.findByText("Rewrite draft")).toBeInTheDocument();
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(invoke).toHaveBeenCalledWith(COMMANDS.editClose, { reason: "timeout" });
+    expect(invoke).toHaveBeenCalledWith(COMMANDS.editClose, {
+      sessionId: 2,
+      reason: "timeout"
+    });
+  });
+
+  it("automatically drafts an available contextual reply once per session without sending", async () => {
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+    render(EditOverlay);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(COMMANDS.editReady));
+
+    const init = {
+      glass: false,
+      session_id: 41,
+      mode: "reply" as const,
+      context_state: "available" as const,
+      context_reason: null
+    };
+    window.dispatchEvent(new CustomEvent(EVENTS.editInit, { detail: init }));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(COMMANDS.editSubmit, {
+        sessionId: 41,
+        instruction: ""
+      })
+    );
+    expect(await screen.findByText("Draft a reply")).toBeInTheDocument();
+    expect(screen.getByText("Drafting your reply…")).toBeInTheDocument();
+    expect(screen.getByText(/insert a draft into the empty composer/i)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(screen.getByText("woof never sends")).toBeInTheDocument();
+
+    window.dispatchEvent(new CustomEvent(EVENTS.editInit, { detail: init }));
+    await Promise.resolve();
+    expect(
+      invoke.mock.calls.filter(([command]) => command === COMMANDS.editSubmit)
+    ).toEqual([[COMMANDS.editSubmit, { sessionId: 41, instruction: "" }]]);
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: { ...init, context_state: "unavailable", context_reason: "stale" }
+      })
+    );
+    expect(screen.queryByText("Reply context unavailable")).not.toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === COMMANDS.chatSend)).toBe(false);
+  });
+
+  it("keeps an unavailable contextual reply inert and explains how to retry", async () => {
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+    render(EditOverlay);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(COMMANDS.editReady));
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: {
+          session_id: 42,
+          mode: "reply",
+          context_state: "unavailable",
+          context_reason: "No recent conversation was visible."
+        }
+      })
+    );
+
+    expect(await screen.findByText("Draft a reply")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("No recent conversation was visible.");
+    expect(screen.getByRole("alert")).toHaveTextContent(/double-tap again to retry/i);
+    expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
+    expect(invoke.mock.calls.some(([command]) => command === COMMANDS.editSubmit)).toBe(false);
+  });
+
+  it("uses Return only to insert rewrites and leaves Shift-Return to the textarea", async () => {
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+    render(EditOverlay);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(COMMANDS.editReady));
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: {
+          session_id: 43,
+          mode: "draft",
+          context_state: "available"
+        }
+      })
+    );
+
+    const editor = screen.getByRole("textbox", { name: "Rewrite instruction" });
+    await fireEvent.input(editor, { target: { value: "make it concise" } });
+    const propagates = ["bub", "bles"].join("");
+    const shiftedReturn = new KeyboardEvent("keydown", {
+      key: "Enter",
+      shiftKey: true,
+      [propagates]: true,
+      cancelable: true
+    } as KeyboardEventInit);
+    expect(editor.dispatchEvent(shiftedReturn)).toBe(true);
+    expect(shiftedReturn.defaultPrevented).toBe(false);
+    expect(invoke.mock.calls.some(([command]) => command === COMMANDS.editSubmit)).toBe(false);
+
+    const plainReturn = new KeyboardEvent("keydown", {
+      key: "Enter",
+      [propagates]: true,
+      cancelable: true
+    } as KeyboardEventInit);
+    expect(editor.dispatchEvent(plainReturn)).toBe(false);
+    expect(plainReturn.defaultPrevented).toBe(true);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith(COMMANDS.editSubmit, {
+        sessionId: 43,
+        instruction: "make it concise"
+      })
+    );
+    expect(invoke.mock.calls.some(([command]) => command === COMMANDS.chatSend)).toBe(false);
+    expect(screen.getByText("woof never sends")).toBeInTheDocument();
+  });
+
+  it("ignores edit state and fade events from stale sessions", async () => {
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+    const view = render(EditOverlay);
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith(COMMANDS.editReady));
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editInit, {
+        detail: {
+          session_id: 51,
+          mode: "draft",
+          context_state: "available"
+        }
+      })
+    );
+    await screen.findByText("Rewrite draft");
+    const editor = screen.getByRole("textbox", { name: "Rewrite instruction" });
+    const main = view.container.querySelector("main");
+    await waitFor(() => expect(main).toHaveClass("visible"));
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editState, {
+        detail: { session_id: 50, state: "error", error: "stale failure" }
+      })
+    );
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editFadeout, { detail: { session_id: 50 } })
+    );
+    expect(screen.queryByText("stale failure")).not.toBeInTheDocument();
+    expect(editor).not.toBeDisabled();
+    expect(main).toHaveClass("visible");
+
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editState, {
+        detail: { session_id: 51, state: "thinking" }
+      })
+    );
+    await waitFor(() => expect(editor).toBeDisabled());
   });
 
   it("keeps settings mounted through the close transition", async () => {

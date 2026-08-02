@@ -316,6 +316,7 @@ mod tests {
             app_name: "TextEdit".into(),
             bundle_id: Some("com.apple.TextEdit".into()),
             window_title: Some("Synthetic".into()),
+            window_id: None,
             browser_url: None,
             secure_input: false,
             root: AccessibilityNode {

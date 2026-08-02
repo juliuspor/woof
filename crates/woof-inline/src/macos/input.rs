@@ -8,6 +8,7 @@ type CGEventRef = *mut c_void;
 
 const EVENT_SOURCE_COMBINED_SESSION: i32 = 0;
 const COMMAND_FLAG: u64 = 1 << 20;
+const KEY_UNICODE_EVENT: u16 = 0;
 const KEY_V: u16 = 9;
 const KEY_DELETE: u16 = 51;
 const UNICODE_CHUNK_UNITS: usize = 20;
@@ -83,10 +84,12 @@ impl MacOsInputInjector {
         Self::ensure_safe()?;
         let source = OwnedCf::new(unsafe { CGEventSourceCreate(EVENT_SOURCE_COMBINED_SESSION) })
             .ok_or(InlineError::InputInjection)?;
-        let down = OwnedCf::new(unsafe { CGEventCreateKeyboardEvent(source.0, 0, true) })
-            .ok_or(InlineError::InputInjection)?;
-        let up = OwnedCf::new(unsafe { CGEventCreateKeyboardEvent(source.0, 0, false) })
-            .ok_or(InlineError::InputInjection)?;
+        let down =
+            OwnedCf::new(unsafe { CGEventCreateKeyboardEvent(source.0, KEY_UNICODE_EVENT, true) })
+                .ok_or(InlineError::InputInjection)?;
+        let up =
+            OwnedCf::new(unsafe { CGEventCreateKeyboardEvent(source.0, KEY_UNICODE_EVENT, false) })
+                .ok_or(InlineError::InputInjection)?;
         Self::ensure_safe()?;
         // SAFETY: `units` remains alive while Core Graphics copies it into
         // both keyboard events.
@@ -168,5 +171,21 @@ impl Drop for OwnedCf {
     fn drop(&mut self) {
         // SAFETY: Values are returned by Core Graphics create-rule functions.
         unsafe { CFRelease(self.0.cast()) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_delivery_keycodes_never_include_return_or_enter() {
+        const KEY_RETURN: u16 = 36;
+        const KEY_KEYPAD_ENTER: u16 = 76;
+
+        for key_code in [KEY_UNICODE_EVENT, KEY_V, KEY_DELETE] {
+            assert_ne!(key_code, KEY_RETURN);
+            assert_ne!(key_code, KEY_KEYPAD_ENTER);
+        }
     }
 }

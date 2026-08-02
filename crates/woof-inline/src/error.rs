@@ -38,10 +38,38 @@ pub enum InlineError {
     ClipboardRestore,
     #[error("synthetic keyboard input failed")]
     InputInjection,
+    #[error("the inline target did not confirm the delivered whole draft")]
+    DeliveryUnconfirmed,
     #[error("the modifier event monitor could not start")]
     EventMonitor,
     #[error("shortcut recording timed out")]
     RecordingTimeout,
     #[error("unsupported shortcut recording key")]
     UnsupportedRecordingKey,
+}
+
+/// Failure disposition for an Accessibility-only preview mutation.
+///
+/// Callers may claim the attempted marker for exact-value cleanup only when
+/// the native write may have reached the retained element.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreviewWriteError {
+    pub error: InlineError,
+    pub may_have_written: bool,
+}
+
+impl PreviewWriteError {
+    pub const fn before_write(error: InlineError) -> Self {
+        Self {
+            error,
+            may_have_written: false,
+        }
+    }
+
+    pub const fn after_write_started(error: InlineError) -> Self {
+        Self {
+            error,
+            may_have_written: true,
+        }
+    }
 }

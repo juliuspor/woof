@@ -458,6 +458,51 @@ export async function invokeMock(command: string, args: Record<string, unknown> 
     window.dispatchEvent(new CustomEvent(EVENTS.memoryHubNavigate, { detail: { route: args.route } }));
     return undefined;
   }
+  if (name === COMMANDS.caretCancel) {
+    if (
+      !Number.isSafeInteger(args.sessionId) ||
+      Object.keys(args).some((key) => key !== "sessionId")
+    ) {
+      throw new Error("caret cancel requires a session ID");
+    }
+    mutation(name, { sessionId: args.sessionId });
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.caretFadeout, { detail: { session_id: args.sessionId } })
+    );
+    return true;
+  }
+  if (name === COMMANDS.editClose) {
+    if (
+      !Number.isSafeInteger(args.sessionId) ||
+      (args.reason !== undefined && typeof args.reason !== "string") ||
+      Object.keys(args).some((key) => key !== "sessionId" && key !== "reason")
+    ) {
+      throw new Error("edit close requires a session ID and optional reason");
+    }
+    mutation(name, { sessionId: args.sessionId, reason: args.reason });
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editFadeout, { detail: { session_id: args.sessionId } })
+    );
+    return true;
+  }
+  if (name === COMMANDS.editSubmit) {
+    if (
+      !Number.isSafeInteger(args.sessionId) ||
+      typeof args.instruction !== "string" ||
+      Object.keys(args).some((key) => key !== "sessionId" && key !== "instruction")
+    ) {
+      throw new Error("edit submit requires a session ID and instruction");
+    }
+    mutation(name, { sessionId: args.sessionId, instruction: args.instruction });
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.editState, {
+        detail: { session_id: args.sessionId, state: "thinking" }
+      })
+    );
+    // The native contract inserts into the retained target. The mock never
+    // dispatches a target Return key or invokes chat/send behavior.
+    return { ok: true, action: "insert" };
+  }
   if (name === COMMANDS.memoryDeleteAll) {
     return { status: "deleted", deleted_rows: 1, vector_index: { indexed: 0 } };
   }

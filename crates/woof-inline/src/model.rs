@@ -41,6 +41,8 @@ pub enum WakeHint {
 pub struct FocusedElementMetadata {
     pub pid: i32,
     pub bundle_id: Option<String>,
+    pub window_title: Option<String>,
+    pub window_id: Option<i64>,
     pub role: String,
     pub subrole: Option<String>,
     pub title: Option<String>,
@@ -59,6 +61,11 @@ impl fmt::Debug for FocusedElementMetadata {
             .debug_struct("FocusedElementMetadata")
             .field("pid", &self.pid)
             .field("bundle_id", &self.bundle_id)
+            .field(
+                "window_title",
+                &self.window_title.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("window_id", &self.window_id)
             .field("role", &self.role)
             .field("subrole", &self.subrole)
             .field("title", &self.title.as_ref().map(|_| "[REDACTED]"))

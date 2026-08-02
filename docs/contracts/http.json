@@ -57,6 +57,7 @@
     "POST /inline-rewrite/record",
     "POST /inline-rewrite/record-output",
     "POST /inline-rewrite/similar-outputs",
+    "POST /inline-rewrite/visible-context",
     "POST /nudges/dismiss",
     "POST /nudges/mark-delivered",
     "POST /nudges/mark-seen",

@@ -40,9 +40,9 @@ use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard, RwLock};
 use tower_http::{catch_panic::CatchPanicLayer, limit::RequestBodyLimitLayer};
 use url::Url;
 use woof_capture::{
-    AccessibilityProvider, BlacklistKind, BlacklistRule, CaptureController, CaptureError,
-    CapturePipeline, CapturePolicy, ExponentialBackoff, ForegroundCapture, PipelineConfig,
-    PipelineOutcome, Redactor, SkipReason, SnapshotCandidate,
+    AccessibilityNode, AccessibilityProvider, BlacklistKind, BlacklistRule, CaptureController,
+    CaptureError, CapturePipeline, CapturePolicy, ExponentialBackoff, ForegroundCapture,
+    PipelineConfig, PipelineOutcome, RawCapture, Redactor, SkipReason, SnapshotCandidate,
 };
 use woof_core::{
     atomic_write_private, health_proof, normalize_capture_blacklist, read_private_file_bounded,
@@ -54,6 +54,7 @@ use woof_storage::{
     CaptureRecord, ProactiveRule, RetentionPruneReport, Storage, StorageError,
     StorageRecoveryReason,
 };
+use zeroize::Zeroize;
 
 use crate::semantic::lock_semantic;
 
@@ -76,6 +77,9 @@ const MAX_INLINE_APP_BYTES: usize = 256;
 const MAX_INLINE_DOMAIN_BYTES: usize = 253;
 const MAX_INLINE_INSTRUCTION_BYTES: usize = 4 * 1_024;
 const MAX_INLINE_OUTPUT_BYTES: usize = 256 * 1_024;
+const MAX_VISIBLE_CONTEXT_WINDOW_TITLE_BYTES: usize = 4 * 1_024;
+const MAX_VISIBLE_CONTEXT_ITEMS: usize = 40;
+const MAX_VISIBLE_CONTEXT_TEXT_BYTES: usize = 8 * 1_024;
 const MAX_CLIENT_TIMESTAMP_FUTURE_SECONDS: i64 = 86_400;
 const MAX_RULE_LABEL_CHARACTERS: usize = 120;
 const MAX_RULE_PROMPT_CHARACTERS: usize = 1_000;
@@ -101,6 +105,16 @@ impl AccessibilityAuthorizer for SystemAccessibilityAuthorizer {
     fn request_trust(&self) -> bool {
         request_daemon_accessibility()
     }
+}
+
+#[cfg(target_os = "macos")]
+fn default_visible_context_provider() -> Option<Arc<dyn AccessibilityProvider>> {
+    Some(Arc::new(MacOsAccessibilityProvider::default()))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn default_visible_context_provider() -> Option<Arc<dyn AccessibilityProvider>> {
+    None
 }
 
 #[derive(Clone, Default)]
@@ -139,6 +153,7 @@ pub struct AppState {
     semantic: Option<SharedSemanticSearch>,
     database_recovery: Option<StorageRecoveryReason>,
     accessibility_authorizer: Arc<dyn AccessibilityAuthorizer>,
+    visible_context_provider: Option<Arc<dyn AccessibilityProvider>>,
     storage_mutation_barrier: StorageMutationBarrier,
     memory_generation_gate: MemoryGenerationGate,
 }
@@ -189,6 +204,7 @@ impl AppState {
             semantic: None,
             database_recovery: None,
             accessibility_authorizer: Arc::new(SystemAccessibilityAuthorizer),
+            visible_context_provider: default_visible_context_provider(),
             storage_mutation_barrier: StorageMutationBarrier::default(),
             memory_generation_gate: MemoryGenerationGate::default(),
         }
@@ -222,6 +238,14 @@ impl AppState {
 
     pub fn with_database_recovery(mut self, recovery: Option<StorageRecoveryReason>) -> Self {
         self.database_recovery = recovery;
+        self
+    }
+
+    pub fn with_visible_context_provider<P>(mut self, provider: P) -> Self
+    where
+        P: AccessibilityProvider + 'static,
+    {
+        self.visible_context_provider = Some(Arc::new(provider));
         self
     }
 
@@ -298,6 +322,10 @@ pub fn router(state: AppState) -> Router {
         .route("/work-patterns/update", post(update_work_pattern))
         .route("/inline-rewrite/record", post(record_inline_use))
         .route("/inline-rewrite/record-output", post(record_inline_output))
+        .route(
+            "/inline-rewrite/visible-context",
+            post(visible_inline_context),
+        )
         .route(
             "/inline-rewrite/similar-outputs",
             post(similar_inline_outputs_post),
@@ -1235,6 +1263,332 @@ async fn similar_inline_outputs(
     Ok(Json(json!({"outputs": outputs})))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VisibleContextRequest {
+    expected_pid: i32,
+    expected_window_title: String,
+    expected_window_id: Option<i64>,
+}
+
+impl Drop for VisibleContextRequest {
+    fn drop(&mut self) {
+        self.expected_window_title.zeroize();
+    }
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum VisibleContextUnavailableReason {
+    Paused,
+    Blacklisted,
+    WrongTarget,
+    NotChatComposer,
+    Empty,
+    CaptureUnavailable,
+}
+
+fn visible_context_unavailable(reason: VisibleContextUnavailableReason) -> Json<Value> {
+    Json(json!({"available": false, "reason": reason}))
+}
+
+fn exact_https_host(url: Option<&str>, expected_host: &str) -> bool {
+    url.and_then(|value| Url::parse(value).ok())
+        .is_some_and(|url| {
+            url.scheme() == "https"
+                && url.host_str() == Some(expected_host)
+                && url.port_or_known_default() == Some(443)
+        })
+}
+
+#[derive(Clone, Copy)]
+enum ContextualReplySurface {
+    Slack,
+    WhatsAppWeb,
+}
+
+fn contextual_reply_surface(capture: &RawCapture) -> Option<ContextualReplySurface> {
+    if capture.bundle_id.as_deref() == Some("com.tinyspeck.slackmacgap") {
+        Some(ContextualReplySurface::Slack)
+    } else if exact_https_host(capture.browser_url.as_deref(), "web.whatsapp.com") {
+        Some(ContextualReplySurface::WhatsAppWeb)
+    } else {
+        None
+    }
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|start| start.eq_ignore_ascii_case(prefix))
+}
+
+fn supported_composer_identity(node: &AccessibilityNode, surface: ContextualReplySurface) -> bool {
+    let semantics = [
+        node.placeholder.as_deref(),
+        node.title.as_deref(),
+        node.description.as_deref(),
+        node.identifier.as_deref(),
+    ];
+    semantics.into_iter().flatten().any(|value| {
+        let value = value.trim();
+        match surface {
+            ContextualReplySurface::WhatsAppWeb => [
+                "Type a message",
+                "Nachricht eingeben",
+                "Escribe un mensaje",
+                "Écrivez un message",
+                "Scrivi un messaggio",
+            ]
+            .into_iter()
+            .any(|supported| value.eq_ignore_ascii_case(supported)),
+            ContextualReplySurface::Slack => {
+                value.eq_ignore_ascii_case("Message")
+                    || starts_with_ignore_ascii_case(value, "Message ")
+                    || starts_with_ignore_ascii_case(value, "Nachricht an ")
+                    || ["message_input", "message-input", "msg_input", "msg-input"]
+                        .into_iter()
+                        .any(|supported| value.eq_ignore_ascii_case(supported))
+            }
+        }
+    })
+}
+
+fn identifies_slack_canvas(node: &AccessibilityNode) -> bool {
+    [
+        node.title.as_deref(),
+        node.description.as_deref(),
+        node.identifier.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("Canvas")
+            || starts_with_ignore_ascii_case(value, "Canvas ")
+            || value.eq_ignore_ascii_case("slack_canvas")
+            || value.eq_ignore_ascii_case("slack-canvas")
+    })
+}
+
+fn has_one_empty_message_composer(
+    root: &AccessibilityNode,
+    surface: ContextualReplySurface,
+) -> bool {
+    fn visit(
+        node: &AccessibilityNode,
+        surface: ContextualReplySurface,
+        protected_ancestor: bool,
+        whatsapp_web_area_ancestor: bool,
+        slack_canvas_ancestor: bool,
+        focused: &mut Vec<bool>,
+    ) {
+        let role = node.role.to_ascii_lowercase();
+        let subrole = node
+            .subrole
+            .as_deref()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let combined_role = format!("{role} {subrole}");
+        let protected = protected_ancestor
+            || node.protected
+            || combined_role.contains("securetextfield")
+            || combined_role.contains("password")
+            || combined_role.contains("secure text");
+        let whatsapp_web_area_ancestor = whatsapp_web_area_ancestor
+            || (role == "axwebarea" && exact_https_host(node.url.as_deref(), "web.whatsapp.com"));
+        let slack_canvas_ancestor = slack_canvas_ancestor || identifies_slack_canvas(node);
+        let editable_role = matches!(
+            role.as_str(),
+            "axtextarea" | "axtextfield" | "axsearchfield" | "axcombobox"
+        ) || subrole == "axtextentryarea";
+        if node.focused && editable_role {
+            let message_role = role == "axtextarea" || subrole == "axtextentryarea";
+            let supported_ancestry = match surface {
+                ContextualReplySurface::Slack => !slack_canvas_ancestor,
+                ContextualReplySurface::WhatsAppWeb => whatsapp_web_area_ancestor,
+            };
+            focused.push(
+                !protected
+                    && message_role
+                    && supported_ancestry
+                    && supported_composer_identity(node, surface)
+                    && node
+                        .value
+                        .as_deref()
+                        .is_some_and(|value| value.trim().is_empty()),
+            );
+        }
+        if protected {
+            return;
+        }
+        for child in &node.children {
+            visit(
+                child,
+                surface,
+                protected,
+                whatsapp_web_area_ancestor,
+                slack_canvas_ancestor,
+                focused,
+            );
+        }
+    }
+
+    let mut focused = Vec::new();
+    visit(root, surface, false, false, false, &mut focused);
+    focused == [true]
+}
+
+fn supports_contextual_reply(capture: &RawCapture) -> bool {
+    contextual_reply_surface(capture)
+        .is_some_and(|surface| has_one_empty_message_composer(&capture.root, surface))
+}
+
+async fn visible_inline_context(
+    State(state): State<AppState>,
+    Json(request): Json<VisibleContextRequest>,
+) -> Result<Json<Value>, ApiError> {
+    if request.expected_pid <= 0 {
+        return Err(ApiError::bad_request(
+            "expected foreground process is invalid",
+        ));
+    }
+    if request
+        .expected_window_id
+        .is_some_and(|window_id| window_id <= 0)
+    {
+        return Err(ApiError::bad_request(
+            "expected foreground window is invalid",
+        ));
+    }
+    validate_nonempty_text(
+        &request.expected_window_title,
+        MAX_VISIBLE_CONTEXT_WINDOW_TITLE_BYTES,
+        false,
+        "expected window title is invalid or too long",
+    )?;
+    if request.expected_window_title.trim() != request.expected_window_title {
+        return Err(ApiError::bad_request(
+            "expected window title is invalid or too long",
+        ));
+    }
+
+    // A shared policy lease makes blacklist and pause updates quiescence
+    // boundaries without treating this read-only, ephemeral capture as a
+    // policy mutation. The pause check must happen after acquiring the lease.
+    let _capture_policy_lease = state.capture_policy_gate.clone().read_owned().await;
+    if state.capture_controller.is_paused() {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::Paused,
+        ));
+    }
+
+    let entries = state.blacklist.read().await.clone();
+    let policy = capture_policy(&entries);
+    let Some(provider) = state.visible_context_provider.clone() else {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::CaptureUnavailable,
+        ));
+    };
+    let captured = match provider
+        .capture_foreground_for_target(
+            &policy,
+            request.expected_pid,
+            &request.expected_window_title,
+            request.expected_window_id,
+        )
+        .await
+    {
+        Ok(ForegroundCapture::Captured(captured)) => captured,
+        Ok(ForegroundCapture::Blacklisted) => {
+            return Ok(visible_context_unavailable(
+                VisibleContextUnavailableReason::Blacklisted,
+            ));
+        }
+        Err(CaptureError::TargetMismatch) => {
+            return Ok(visible_context_unavailable(
+                VisibleContextUnavailableReason::WrongTarget,
+            ));
+        }
+        Err(CaptureError::UnsupportedSurface) => {
+            return Ok(visible_context_unavailable(
+                VisibleContextUnavailableReason::NotChatComposer,
+            ));
+        }
+        Err(_) => {
+            return Ok(visible_context_unavailable(
+                VisibleContextUnavailableReason::CaptureUnavailable,
+            ));
+        }
+    };
+
+    // Keep the policy boundary defensive even for injected providers: a
+    // provider may return a capture directly instead of applying preflight.
+    if policy.is_blacklisted(&captured) {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::Blacklisted,
+        ));
+    }
+    if captured.secure_input {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::CaptureUnavailable,
+        ));
+    }
+    if captured.pid != request.expected_pid
+        || captured.window_title.as_deref() != Some(request.expected_window_title.as_str())
+        || request
+            .expected_window_id
+            .is_some_and(|window_id| captured.window_id != Some(window_id))
+    {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::WrongTarget,
+        ));
+    }
+    if !supports_contextual_reply(&captured) {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::NotChatComposer,
+        ));
+    }
+
+    let Some(mut unredacted_text) = captured
+        .root
+        .recent_visible_context_bounded(MAX_VISIBLE_CONTEXT_ITEMS, MAX_VISIBLE_CONTEXT_TEXT_BYTES)
+    else {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::Empty,
+        ));
+    };
+    let redactor = Redactor::default();
+    let text =
+        redact_bounded_visible_context(&redactor, &unredacted_text, MAX_VISIBLE_CONTEXT_TEXT_BYTES);
+    unredacted_text.zeroize();
+    if text.trim().is_empty() {
+        return Ok(visible_context_unavailable(
+            VisibleContextUnavailableReason::Empty,
+        ));
+    }
+    let app = redact_bounded_visible_context(&redactor, &captured.app_name, MAX_INLINE_APP_BYTES);
+    let window_title = captured.window_title.as_deref().map(|value| {
+        redact_bounded_visible_context(&redactor, value, MAX_VISIBLE_CONTEXT_WINDOW_TITLE_BYTES)
+    });
+    let domain = captured
+        .browser_url
+        .as_deref()
+        .and_then(|value| Url::parse(value).ok())
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .map(|value| redact_bounded_visible_context(&redactor, &value, MAX_INLINE_DOMAIN_BYTES));
+
+    Ok(Json(json!({
+        "available": true,
+        "context": {
+            "app": app,
+            "window_title": window_title,
+            "domain": domain,
+            "text": text
+        }
+    })))
+}
+
 async fn capture_status(State(state): State<AppState>) -> Json<Value> {
     let paused = state.capture_controller.is_paused();
     let runtime = state.capture_runtime.read().await.clone();
@@ -2122,6 +2476,8 @@ fn capture_error_code(error: &CaptureError) -> &'static str {
         CaptureError::PermissionDenied => "permission_denied",
         CaptureError::SecureInput => "secure_input",
         CaptureError::NoFocusedApplication => "no_focused_application",
+        CaptureError::TargetMismatch => "target_mismatch",
+        CaptureError::UnsupportedSurface => "unsupported_surface",
         CaptureError::Accessibility(_) => "accessibility",
     }
 }
@@ -2137,6 +2493,28 @@ fn contains_disallowed_controls(value: &str, allow_multiline: bool) -> bool {
     value.chars().any(|character| {
         character.is_control() && !(allow_multiline && matches!(character, '\n' | '\r' | '\t'))
     })
+}
+
+fn redact_bounded_visible_context(
+    redactor: &Redactor,
+    value: &str,
+    maximum_bytes: usize,
+) -> String {
+    let mut redacted = redactor.redact(value).text;
+    if redacted.len() > maximum_bytes {
+        let mut boundary = maximum_bytes;
+        while !redacted.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        redacted.truncate(boundary);
+        if let Some(marker_start) = redacted.rfind("[REDACTED_") {
+            if !redacted[marker_start..].contains(']') {
+                redacted.truncate(marker_start);
+                redacted.truncate(redacted.trim_end().len());
+            }
+        }
+    }
+    redacted
 }
 
 fn validate_nonempty_text(
@@ -2587,6 +2965,7 @@ mod concurrency_tests {
             app_name: "TextEdit".to_string(),
             bundle_id: Some("com.apple.TextEdit".to_string()),
             window_title: Some("Fixture".to_string()),
+            window_id: None,
             browser_url: None,
             secure_input: false,
             root: woof_capture::AccessibilityNode {

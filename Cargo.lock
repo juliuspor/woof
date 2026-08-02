@@ -6307,6 +6307,7 @@ dependencies = [
  "woof-llm",
  "woof-search",
  "woof-storage",
+ "zeroize",
 ]
 
 [[package]]

@@ -332,6 +332,16 @@ function assertNetworkSourceInventory() {
       ],
     ],
     [
+      "crates/woof-capture/src/model.rs",
+      [
+        "https://example.com/chat",
+        "https://web.whatsapp.com/chat",
+        "https://web.whatsapp.com/chat",
+        "https://web.whatsapp.com/chat",
+        "https://example.com/chat",
+      ],
+    ],
+    [
       "crates/woof-capture/src/policy.rs",
       [
         "https://secret.example.com/report",

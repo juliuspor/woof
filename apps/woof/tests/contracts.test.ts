@@ -18,7 +18,11 @@ import {
   transcriptionItemFromPayload,
   transcriptionLevelFromPayload,
   type CaptureBlacklistResponse,
+  type CaretFadeoutPayload,
   type DockPosition,
+  type EditFadeoutPayload,
+  type EditInitPayload,
+  type EditStatePayload,
   type ModifierKey,
   type ShortcutChord
 } from "../src/lib/contracts/ipc";
@@ -37,6 +41,27 @@ describe("woof desktop contract", () => {
   });
 
   it("uses one native event payload shape", () => {
+    const editInit: EditInitPayload = {
+      glass: true,
+      session_id: 9,
+      mode: "reply",
+      context_state: "unavailable",
+      context_reason: "No recent context was visible."
+    };
+    expect(editInit).toEqual({
+      glass: true,
+      session_id: 9,
+      mode: "reply",
+      context_state: "unavailable",
+      context_reason: "No recent context was visible."
+    });
+    const editState: EditStatePayload = { session_id: 9, state: "thinking" };
+    const editFadeout: EditFadeoutPayload = { session_id: 9 };
+    const caretFadeout: CaretFadeoutPayload = { session_id: 9 };
+    expect(editState).toEqual({ session_id: 9, state: "thinking" });
+    expect(editFadeout).toEqual({ session_id: 9 });
+    expect(caretFadeout).toEqual({ session_id: 9 });
+    expect(EVENTS).not.toHaveProperty("editContext");
     expect(companionModeFromState("hidden")).toBe("hidden");
     expect(companionModeFromState("collapsed")).toBe("collapsed");
     expect(companionModeFromState("expanded")).toBe("expanded");
@@ -340,7 +365,8 @@ describe("woof desktop contract", () => {
       "verify_edit_delivery_controller(&window)?;",
       "edit_mode_submit_inner("
     );
-    expect(editOuter).toContain('.emit("woof:edit-state"');
+    expect(editOuter).toContain('"woof:edit-state"');
+    expect(editOuter).toContain('"session_id": session_id');
 
     const chatStart = nativeSource.indexOf("pub async fn chat_send(");
     const chatEnd = nativeSource.indexOf("pub fn chat_cancel(", chatStart);

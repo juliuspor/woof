@@ -15,17 +15,20 @@ use async_trait::async_trait;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
-    AccessibilityNode, AccessibilityProvider, CaptureError, CaptureMetadata, CapturePolicy,
+    capture_contextual_reply_after_surface_preflight, validate_capture_target, AccessibilityNode,
+    AccessibilityProvider, AccessibilityRect, CaptureError, CaptureMetadata, CapturePolicy,
     ForegroundCapture, WOOF_BUNDLE_ID,
 };
 
 type CFTypeRef = *const c_void;
 type CFStringRef = *const c_void;
+type CFNumberRef = *const c_void;
 type CFArrayRef = *const c_void;
 type CFDictionaryRef = *const c_void;
 type CFTypeId = usize;
 type CFIndex = isize;
 type AXUIElementRef = *const c_void;
+type AXValueRef = *const c_void;
 type AXError = i32;
 type OSErr = i16;
 type OSStatus = i32;
@@ -33,8 +36,33 @@ type OSStatus = i32;
 const AX_ERROR_SUCCESS: AXError = 0;
 const NO_ERR: OSStatus = 0;
 const UTF8: u32 = 0x0800_0100;
+const AX_VALUE_CGPOINT: i32 = 1;
+const AX_VALUE_CGSIZE: i32 = 2;
+const AX_VALUE_CGRECT: i32 = 3;
+const CF_NUMBER_SINT64_TYPE: i32 = 4;
 const MAX_CAPTURE_STRING_ALLOCATION_BYTES: usize = 4 * 1024 * 1024;
 const CAPTURE_STRING_BUDGET_EXHAUSTED: &str = "capture string allocation budget exhausted";
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -58,6 +86,9 @@ extern "C" {
     ) -> AXError;
     fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> AXError;
     fn AXUIElementGetTypeID() -> CFTypeId;
+    fn AXValueGetTypeID() -> CFTypeId;
+    fn AXValueGetType(value: AXValueRef) -> i32;
+    fn AXValueGetValue(value: AXValueRef, value_type: i32, output: *mut c_void) -> bool;
 }
 
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -98,6 +129,8 @@ extern "C" {
     fn CFDictionaryGetValue(dictionary: CFDictionaryRef, key: CFTypeRef) -> CFTypeRef;
     fn CFBooleanGetTypeID() -> CFTypeId;
     fn CFBooleanGetValue(value: CFTypeRef) -> bool;
+    fn CFNumberGetTypeID() -> CFTypeId;
+    fn CFNumberGetValue(number: CFNumberRef, number_type: i32, value: *mut c_void) -> bool;
 }
 
 #[link(name = "Carbon", kind = "framework")]
@@ -198,6 +231,14 @@ impl MacOsAccessibilityProvider {
     }
 
     fn capture_sync(&self, policy: &CapturePolicy) -> Result<ForegroundCapture, CaptureError> {
+        self.capture_sync_for_target(policy, None)
+    }
+
+    fn capture_sync_for_target(
+        &self,
+        policy: &CapturePolicy,
+        expected_target: Option<(i32, &str, Option<i64>)>,
+    ) -> Result<ForegroundCapture, CaptureError> {
         if !Self::process_is_trusted() {
             return Err(CaptureError::PermissionDenied);
         }
@@ -234,6 +275,7 @@ impl MacOsAccessibilityProvider {
             self.max_field_bytes,
             &mut string_budget,
         )?;
+        let window_id = copy_positive_i64(window.0, "AXWindowNumber")?;
         let app_name = match localized_name.take() {
             Some(app_name) => app_name,
             None => copy_string(
@@ -254,8 +296,26 @@ impl MacOsAccessibilityProvider {
             app_name,
             bundle_id,
             window_title,
+            window_id,
             browser_url: None,
         };
+        // The inline-reply request is tied to the process and window that were
+        // focused when the hotkey fired. Compare that shallow metadata before
+        // either the browser URL walk or the recursive text-tree read, so a
+        // focus switch cannot expose the newly foreground window's contents.
+        if let Some((expected_pid, expected_window_title, expected_window_id)) = expected_target {
+            validate_capture_target(
+                metadata.pid,
+                metadata.window_title.as_deref(),
+                metadata.window_id,
+                expected_pid,
+                expected_window_title,
+                expected_window_id,
+            )?;
+            if focused.is_none() {
+                return Err(CaptureError::TargetMismatch);
+            }
+        }
         if policy.is_blacklisted_metadata(&metadata) {
             metadata.zeroize_sensitive();
             return Ok(ForegroundCapture::Blacklisted);
@@ -290,7 +350,15 @@ impl MacOsAccessibilityProvider {
             policy_rejected: false,
             string_budget,
         };
-        let mut root = self.read_node(window.0, 0, &mut budget, &mut tree_context)?;
+        let mut root = if expected_target.is_some() {
+            capture_contextual_reply_after_surface_preflight(
+                metadata.bundle_id.as_deref(),
+                &initial_browser_observation.urls,
+                || self.read_node(window.0, 0, &mut budget, &mut tree_context),
+            )?
+        } else {
+            self.read_node(window.0, 0, &mut budget, &mut tree_context)?
+        };
         if tree_context.policy_rejected {
             root.zeroize_sensitive();
             metadata.zeroize_sensitive();
@@ -304,6 +372,79 @@ impl MacOsAccessibilityProvider {
             return Err(error);
         }
 
+        // Query the global foreground target again after the recursive read.
+        // Exact CF identity closes same-PID/same-title window and focused-
+        // element races that metadata strings alone cannot distinguish.
+        let (current_application, current_pid) = match foreground_application() {
+            Ok(current) => current,
+            Err(error) => {
+                root.zeroize_sensitive();
+                return if expected_target.is_some() {
+                    Err(CaptureError::TargetMismatch)
+                } else {
+                    Err(error)
+                };
+            }
+        };
+        let current_window = match copy_element(current_application.0, "AXFocusedWindow") {
+            Ok(Some(current_window)) => current_window,
+            Ok(None) => {
+                root.zeroize_sensitive();
+                return if expected_target.is_some() {
+                    Err(CaptureError::TargetMismatch)
+                } else {
+                    Ok(ForegroundCapture::Blacklisted)
+                };
+            }
+            Err(error) => {
+                root.zeroize_sensitive();
+                return Err(error);
+            }
+        };
+        let current_focused = match copy_element(current_application.0, "AXFocusedUIElement") {
+            Ok(current_focused) => current_focused,
+            Err(error) => {
+                root.zeroize_sensitive();
+                return Err(error);
+            }
+        };
+        let current_window_id = match copy_positive_i64(current_window.0, "AXWindowNumber") {
+            Ok(window_id) => window_id,
+            Err(error) => {
+                root.zeroize_sensitive();
+                return Err(error);
+            }
+        };
+        let same_window = unsafe {
+            // SAFETY: Both AX window references remain retained for this
+            // comparison and are not used after their owners are dropped.
+            CFEqual(window.0, current_window.0)
+        };
+        let same_focused_element = match (focused.as_ref(), current_focused.as_ref()) {
+            (Some(expected), Some(current)) => unsafe {
+                // SAFETY: Both AX element references are retained here.
+                CFEqual(expected.0, current.0)
+            },
+            (None, None) => true,
+            _ => false,
+        };
+        if !capture_focus_observation_is_stable(
+            metadata.pid,
+            current_pid,
+            same_window,
+            same_focused_element,
+            expected_target.and_then(|target| target.2),
+            metadata.window_id,
+            current_window_id,
+        ) {
+            root.zeroize_sensitive();
+            return if expected_target.is_some() {
+                Err(CaptureError::TargetMismatch)
+            } else {
+                Ok(ForegroundCapture::Blacklisted)
+            };
+        }
+
         // A browser may expose more than one visible web document, or navigate
         // while the full tree is being read. Re-run the metadata-only walk and
         // require the complete ordered URL observation plus the window title to
@@ -311,7 +452,7 @@ impl MacOsAccessibilityProvider {
         // first allowed or stale URL from authorizing different current text.
         let mut current_metadata_budget = self.max_nodes;
         let current_browser_search = match self.read_browser_url_metadata(
-            window.0,
+            current_window.0,
             0,
             &mut current_metadata_budget,
             &mut tree_context.string_budget,
@@ -331,7 +472,7 @@ impl MacOsAccessibilityProvider {
                 }
             };
         let mut current_window_title = match copy_string(
-            window.0,
+            current_window.0,
             "AXTitle",
             self.max_field_bytes,
             &mut tree_context.string_budget,
@@ -346,12 +487,18 @@ impl MacOsAccessibilityProvider {
             &metadata,
             &initial_browser_observation,
             current_window_title.as_deref(),
+            current_window_id,
+            expected_target.and_then(|target| target.2),
             &current_browser_observation,
         );
         zeroize_optional_string(&mut current_window_title);
         if !metadata_stable {
             root.zeroize_sensitive();
-            return Ok(ForegroundCapture::Blacklisted);
+            return if expected_target.is_some() {
+                Err(CaptureError::TargetMismatch)
+            } else {
+                Ok(ForegroundCapture::Blacklisted)
+            };
         }
         if let Err(error) = capture_state(
             unsafe { IsSecureEventInputEnabled() },
@@ -520,14 +667,24 @@ impl MacOsAccessibilityProvider {
                 }
             }
         };
+        let frame = match copy_frame(element) {
+            Ok(frame) => frame,
+            Err(error) => {
+                role.zeroize();
+                zeroize_optional_string(&mut subrole);
+                return Err(error);
+            }
+        };
         let protected = protected_content || role_is_sensitive(&role, subrole.as_deref());
         if protected {
             return Ok(AccessibilityNode {
                 role,
                 subrole,
+                frame,
                 title: None,
                 value: None,
                 description: None,
+                placeholder: None,
                 identifier: None,
                 url: None,
                 focused: is_focused,
@@ -569,9 +726,11 @@ impl MacOsAccessibilityProvider {
         let mut node = AccessibilityNode {
             role,
             subrole,
+            frame,
             title: None,
             value: None,
             description: None,
+            placeholder: None,
             identifier: None,
             url: None,
             focused: is_focused,
@@ -605,6 +764,18 @@ impl MacOsAccessibilityProvider {
         node.description = match copy_string(
             element,
             "AXDescription",
+            self.max_field_bytes,
+            &mut context.string_budget,
+        ) {
+            Ok(value) => value,
+            Err(error) => {
+                zeroize_node(&mut node);
+                return Err(error);
+            }
+        };
+        node.placeholder = match copy_string(
+            element,
+            "AXPlaceholderValue",
             self.max_field_bytes,
             &mut context.string_budget,
         ) {
@@ -719,6 +890,19 @@ impl AccessibilityProvider for MacOsAccessibilityProvider {
         policy: &CapturePolicy,
     ) -> Result<ForegroundCapture, CaptureError> {
         self.capture_sync(policy)
+    }
+
+    async fn capture_foreground_for_target(
+        &self,
+        policy: &CapturePolicy,
+        expected_pid: i32,
+        expected_window_title: &str,
+        expected_window_id: Option<i64>,
+    ) -> Result<ForegroundCapture, CaptureError> {
+        self.capture_sync_for_target(
+            policy,
+            Some((expected_pid, expected_window_title, expected_window_id)),
+        )
     }
 }
 
@@ -887,6 +1071,105 @@ fn copy_bool(element: AXUIElementRef, attribute: &str) -> Result<Option<bool>, C
     // SAFETY: The type check precedes `CFBooleanGetValue`.
     unsafe {
         Ok((CFGetTypeID(value.0) == CFBooleanGetTypeID()).then(|| CFBooleanGetValue(value.0)))
+    }
+}
+
+fn copy_positive_i64(
+    element: AXUIElementRef,
+    attribute: &str,
+) -> Result<Option<i64>, CaptureError> {
+    let Some(value) = copy_attribute(element, attribute)? else {
+        return Ok(None);
+    };
+    // SAFETY: Type identity is checked before CFNumber copies a signed 64-bit
+    // value into correctly aligned Rust storage. AX window numbers are valid
+    // identities only when strictly positive.
+    unsafe {
+        if CFGetTypeID(value.0) != CFNumberGetTypeID() {
+            return Ok(None);
+        }
+        let mut output = 0_i64;
+        if !CFNumberGetValue(
+            value.0 as CFNumberRef,
+            CF_NUMBER_SINT64_TYPE,
+            ptr::addr_of_mut!(output).cast(),
+        ) {
+            return Ok(None);
+        }
+        Ok((output > 0).then_some(output))
+    }
+}
+
+fn copy_frame(element: AXUIElementRef) -> Result<Option<AccessibilityRect>, CaptureError> {
+    if let Some(frame) = copy_ax_value::<CGRect>(element, "AXFrame", AX_VALUE_CGRECT)? {
+        if let Some(frame) = integer_rect(frame.origin, frame.size) {
+            return Ok(Some(frame));
+        }
+    }
+
+    let position = copy_ax_value::<CGPoint>(element, "AXPosition", AX_VALUE_CGPOINT)?;
+    let size = copy_ax_value::<CGSize>(element, "AXSize", AX_VALUE_CGSIZE)?;
+    Ok(position
+        .zip(size)
+        .and_then(|(position, size)| integer_rect(position, size)))
+}
+
+fn copy_ax_value<T: Default>(
+    element: AXUIElementRef,
+    attribute: &str,
+    value_type: i32,
+) -> Result<Option<T>, CaptureError> {
+    let Some(value) = copy_attribute(element, attribute)? else {
+        return Ok(None);
+    };
+    // SAFETY: The AXValue type is checked before its fixed-size payload is
+    // copied into a correctly sized output value.
+    unsafe {
+        if CFGetTypeID(value.0) != AXValueGetTypeID()
+            || AXValueGetType(value.0 as AXValueRef) != value_type
+        {
+            return Ok(None);
+        }
+        let mut output = T::default();
+        if AXValueGetValue(
+            value.0 as AXValueRef,
+            value_type,
+            ptr::addr_of_mut!(output).cast(),
+        ) {
+            Ok(Some(output))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+fn integer_rect(position: CGPoint, size: CGSize) -> Option<AccessibilityRect> {
+    let rounded = AccessibilityRect {
+        x: finite_rounded_i64(position.x)?,
+        y: finite_rounded_i64(position.y)?,
+        width: finite_rounded_i64(size.width)?,
+        height: finite_rounded_i64(size.height)?,
+    };
+    if rounded.width <= 0
+        || rounded.height <= 0
+        || rounded.x.checked_add(rounded.width).is_none()
+        || rounded.y.checked_add(rounded.height).is_none()
+    {
+        None
+    } else {
+        Some(rounded)
+    }
+}
+
+fn finite_rounded_i64(value: f64) -> Option<i64> {
+    if !value.is_finite() {
+        return None;
+    }
+    let rounded = value.round();
+    if rounded <= i64::MIN as f64 || rounded >= i64::MAX as f64 {
+        None
+    } else {
+        Some(rounded as i64)
     }
 }
 
@@ -1092,9 +1375,32 @@ fn browser_capture_metadata_is_stable(
     metadata: &CaptureMetadata,
     initial_urls: &BrowserUrlObservation,
     current_window_title: Option<&str>,
+    current_window_id: Option<i64>,
+    expected_window_id: Option<i64>,
     current_urls: &BrowserUrlObservation,
 ) -> bool {
-    metadata.window_title.as_deref() == current_window_title && initial_urls == current_urls
+    metadata.window_title.as_deref() == current_window_title
+        && expected_window_id.is_none_or(|window_id| {
+            metadata.window_id == Some(window_id) && current_window_id == Some(window_id)
+        })
+        && initial_urls == current_urls
+}
+
+fn capture_focus_observation_is_stable(
+    expected_pid: i32,
+    current_pid: i32,
+    same_window: bool,
+    same_focused_element: bool,
+    expected_window_id: Option<i64>,
+    initial_window_id: Option<i64>,
+    current_window_id: Option<i64>,
+) -> bool {
+    expected_pid == current_pid
+        && same_window
+        && same_focused_element
+        && expected_window_id.is_none_or(|window_id| {
+            initial_window_id == Some(window_id) && current_window_id == Some(window_id)
+        })
 }
 
 fn zeroize_optional_string(value: &mut Option<String>) {
@@ -1504,13 +1810,15 @@ mod tests {
     use crate::{BlacklistKind, BlacklistRule, CaptureMetadata, CapturePolicy};
 
     use super::{
-        browser_capture_metadata_is_stable, capture_state, carbon_process_identifier,
-        finalize_browser_url_preflight, is_woof_process_candidate, normalize_process_identifier,
-        ns_string, nul_terminated_utf8_buffer_into_string, probe_browser_url_element,
+        browser_capture_metadata_is_stable, capture_focus_observation_is_stable, capture_state,
+        carbon_process_identifier, finalize_browser_url_preflight, integer_rect,
+        is_woof_process_candidate, normalize_process_identifier, ns_string,
+        nul_terminated_utf8_buffer_into_string, probe_browser_url_element,
         resolve_browser_url_subtree, role_is_web_document, web_document_is_authorized,
-        zeroize_node, AccessibilityNode, BrowserUrlElementProbe, BrowserUrlObservation,
-        BrowserUrlPreflight, BrowserUrlSearch, CaptureError, CaptureStringBudget, OwnedCf,
-        CAPTURE_STRING_BUDGET_EXHAUSTED, MAX_CAPTURE_STRING_ALLOCATION_BYTES, UTF8, WOOF_BUNDLE_ID,
+        zeroize_node, AccessibilityNode, AccessibilityRect, BrowserUrlElementProbe,
+        BrowserUrlObservation, BrowserUrlPreflight, BrowserUrlSearch, CGPoint, CGSize,
+        CaptureError, CaptureStringBudget, OwnedCf, CAPTURE_STRING_BUDGET_EXHAUSTED,
+        MAX_CAPTURE_STRING_ALLOCATION_BYTES, UTF8, WOOF_BUNDLE_ID,
     };
 
     fn metadata() -> CaptureMetadata {
@@ -1520,6 +1828,7 @@ mod tests {
             app_name: "Safari".to_owned(),
             bundle_id: Some("com.apple.Safari".to_owned()),
             window_title: Some("Current page".to_owned()),
+            window_id: Some(9_001),
             browser_url: None,
         }
     }
@@ -1572,6 +1881,67 @@ mod tests {
             capture_state(false, false),
             Err(CaptureError::NoFocusedApplication)
         ));
+    }
+
+    #[test]
+    fn accessibility_geometry_is_rounded_to_valid_integer_rectangles() {
+        assert_eq!(
+            integer_rect(
+                CGPoint { x: -10.4, y: 20.6 },
+                CGSize {
+                    width: 399.6,
+                    height: 40.4,
+                },
+            ),
+            Some(AccessibilityRect {
+                x: -10,
+                y: 21,
+                width: 400,
+                height: 40,
+            })
+        );
+    }
+
+    #[test]
+    fn accessibility_geometry_rejects_nonfinite_empty_and_overflowing_rectangles() {
+        for (position, size) in [
+            (
+                CGPoint {
+                    x: f64::NAN,
+                    y: 0.0,
+                },
+                CGSize {
+                    width: 10.0,
+                    height: 10.0,
+                },
+            ),
+            (
+                CGPoint { x: 0.0, y: 0.0 },
+                CGSize {
+                    width: 0.4,
+                    height: 10.0,
+                },
+            ),
+            (
+                CGPoint { x: 0.0, y: 0.0 },
+                CGSize {
+                    width: -1.0,
+                    height: 10.0,
+                },
+            ),
+            (
+                CGPoint {
+                    x: i64::MAX as f64,
+                    y: 0.0,
+                },
+                CGSize {
+                    width: 10.0,
+                    height: 10.0,
+                },
+            ),
+        ] {
+            assert_eq!(integer_rect(position, size), None);
+        }
     }
 
     #[test]
@@ -1968,6 +2338,8 @@ mod tests {
             &metadata,
             &initial_urls,
             Some("Current page"),
+            Some(9_001),
+            Some(9_001),
             &same_urls,
         ));
 
@@ -1978,13 +2350,71 @@ mod tests {
             &metadata,
             &initial_urls,
             Some("Current page"),
+            Some(9_001),
+            Some(9_001),
             &navigated_urls,
         ));
         assert!(!browser_capture_metadata_is_stable(
             &metadata,
             &initial_urls,
             Some("Different page"),
+            Some(9_001),
+            Some(9_001),
             &same_urls,
+        ));
+        assert!(!browser_capture_metadata_is_stable(
+            &metadata,
+            &initial_urls,
+            Some("Current page"),
+            Some(9_002),
+            Some(9_001),
+            &same_urls,
+        ));
+        assert!(browser_capture_metadata_is_stable(
+            &metadata,
+            &initial_urls,
+            Some("Current page"),
+            Some(9_002),
+            None,
+            &same_urls,
+        ));
+    }
+
+    #[test]
+    fn focused_window_and_element_observation_must_remain_exact() {
+        assert!(capture_focus_observation_is_stable(
+            42,
+            42,
+            true,
+            true,
+            Some(9_001),
+            Some(9_001),
+            Some(9_001),
+        ));
+        for observation in [
+            (7, true, true, Some(9_001), Some(9_001)),
+            (42, true, true, Some(9_001), Some(9_002)),
+            (42, false, true, Some(9_001), Some(9_001)),
+            (42, true, false, Some(9_001), Some(9_001)),
+        ] {
+            assert!(!capture_focus_observation_is_stable(
+                42,
+                observation.0,
+                observation.1,
+                observation.2,
+                Some(9_001),
+                observation.3,
+                observation.4,
+            ));
+        }
+        assert!(capture_focus_observation_is_stable(
+            42,
+            42,
+            true,
+            true,
+            None,
+            None,
+            Some(9_002),
         ));
     }
 }

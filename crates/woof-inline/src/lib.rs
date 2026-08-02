@@ -17,7 +17,7 @@ pub use clipboard::{
     with_temporary_text, Clipboard, ClipboardItem, ClipboardRepresentation, ClipboardRevision,
     ClipboardSnapshot,
 };
-pub use error::InlineError;
+pub use error::{InlineError, PreviewWriteError};
 #[cfg(target_os = "macos")]
 pub use macos::{
     input_monitoring_trusted, record_modifier_key, record_shortcut_chord, request_input_monitoring,

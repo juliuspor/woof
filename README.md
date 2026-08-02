@@ -7,6 +7,7 @@ The repository contains the application source, shared libraries, assets, interf
 ## Capabilities
 
 - Captures foreground application text and focused-element context without taking screenshots.
+- Double-tapping the configured rewrite modifier in an empty WhatsApp Web composer—or a Slack composer whose visible transcript explicitly identifies authorship—first captures the recent visible conversation. Once the LLM request is in flight, woof cycles `generating.` / `generating..` / `generating...` in that composer through Accessibility-only writes, then replaces the exact current marker with the reply without sending. Marker updates never use the clipboard or keyboard. Cancellation removes an exact marker only while woof's controller still owns keyboard focus; otherwise woof leaves the composer untouched and asks the user to review it.
 - Stores snapshots, activity events, summaries, wiki pages, reminders, and time records on the Mac.
 - Runs full-text search, semantic embeddings, and vector search locally.
 - Schedules one-time and daily reminders while the menu-bar app is running.

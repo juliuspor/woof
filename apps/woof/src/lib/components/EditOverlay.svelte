@@ -1,12 +1,16 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { ArrowUp, Check, Command, CornerDownLeft, Sparkles, X } from "lucide-svelte";
+  import { ArrowUp, Command, CornerDownLeft, Sparkles, X } from "lucide-svelte";
   import Mascot from "./Mascot.svelte";
   import {
     COMMANDS,
     EVENTS,
+    type EditFadeoutPayload,
     type EditInitPayload,
     type EditStatePayload,
+    type InlineContextState,
+    type InlineEditMode,
+    type InlineRefusedPayload,
     type TranscriptionItemPayload,
     transcriptionItemFromPayload
   } from "$lib/contracts/ipc";
@@ -18,7 +22,11 @@
 
   let instruction = $state("");
   let submitting = $state(false);
-  let scope = $state<"selection" | "draft">("selection");
+  let sessionId = $state(0);
+  let mode = $state<InlineEditMode>("selection");
+  let contextState = $state<InlineContextState>("unavailable");
+  let contextReason = $state("");
+  let replyPhase = $state<"reading" | "drafting" | "failed">("reading");
   let editor = $state<HTMLTextAreaElement>();
   let error = $state("");
   let visible = $state(false);
@@ -32,6 +40,36 @@
   let focusTimer: number | null = null;
   let transcriptionFallbackTimer: number | null = null;
   let heightFrame: number | null = null;
+  let autoSubmittedReplySession = 0;
+
+  function titleForMode(value: InlineEditMode): string {
+    if (value === "reply") return "Draft a reply";
+    if (value === "draft") return "Rewrite draft";
+    return "Rewrite selection";
+  }
+
+  function subtitleForMode(value: InlineEditMode): string {
+    if (value === "reply") return "Empty composer";
+    if (value === "draft") return "Whole draft";
+    return "Selected text";
+  }
+
+  function contextUnavailableCopy(): string {
+    if (contextReason) return contextReason;
+    if (mode === "reply") return "woof could not find recent on-screen context for a reply.";
+    return "Recent on-screen context is unavailable; only your text will be used.";
+  }
+
+  function footerContextCopy(): string {
+    if (mode === "reply") {
+      return contextState === "available"
+        ? "Uses recent on-screen context for this draft"
+        : "No reply context was used";
+    }
+    return mode === "selection"
+      ? "Uses selected text and local rewrite examples"
+      : "Uses this draft and local rewrite examples";
+  }
 
   function refusalMessage(reason: string): string {
     switch (reason) {
@@ -74,8 +112,9 @@
     if (heightFrame !== null) return;
     heightFrame = window.requestAnimationFrame(() => {
       heightFrame = null;
-      const inputHeight = editor?.scrollHeight ?? 20;
-      const height = inputHeight + 20 + (error ? 26 : 0);
+      const bodyHeight = mode === "reply" ? 72 : (editor?.scrollHeight ?? 20) + 20;
+      const unavailableNote = contextState === "unavailable" ? 26 : 0;
+      const height = bodyHeight + unavailableNote + (error ? 26 : 0);
       void invokeCommand(COMMANDS.editSetContentHeight, { height }).catch(() => undefined);
     });
   }
@@ -98,6 +137,7 @@
   }
 
   function finishTranscription(): void {
+    if (mode === "reply") return;
     transcribing = false;
     clearTimer(transcriptionFallbackTimer);
     if (transcript.trim()) {
@@ -128,78 +168,130 @@
     reportContentHeight();
   }
 
-  async function submit(): Promise<void> {
-    const clean = instruction.trim();
+  async function submit(requestedInstruction = instruction): Promise<void> {
+    const clean = requestedInstruction.trim();
     if (submitting) return;
-    if (!clean) {
-      return;
-    }
+    if (!Number.isSafeInteger(sessionId) || sessionId <= 0) return;
+    if (mode === "reply" && contextState !== "available") return;
+    if (mode !== "reply" && !clean) return;
+    const requestedSessionId = sessionId;
     submitting = true;
     error = "";
+    if (mode === "reply") replyPhase = "reading";
     try {
       await invokeCommand(COMMANDS.editSubmit, {
-        instruction: clean,
-        scope
+        sessionId: requestedSessionId,
+        instruction: mode === "reply" ? "" : clean
       });
     } catch (cause) {
+      if (sessionId !== requestedSessionId) return;
       submitting = false;
-      error = cause instanceof Error ? cause.message : String(cause || "The rewrite failed.");
+      if (mode === "reply") replyPhase = "failed";
+      error = cause instanceof Error ? cause.message : String(cause || "The edit failed.");
       resetIdleTimer();
       reportContentHeight();
     }
   }
 
+  function applyInit(payload: EditInitPayload): void {
+    if (
+      !payload ||
+      !Number.isSafeInteger(payload.session_id) ||
+      payload.session_id <= 0 ||
+      !["reply", "selection", "draft"].includes(payload.mode) ||
+      !["available", "unavailable"].includes(payload.context_state)
+    ) {
+      return;
+    }
+    if (sessionId > 0 && payload.session_id < sessionId) return;
+
+    const sameSession = payload.session_id === sessionId;
+    if (
+      sameSession &&
+      contextState === "available" &&
+      payload.context_state === "unavailable"
+    ) {
+      return;
+    }
+    sessionId = payload.session_id;
+    mode = payload.mode;
+    contextState = payload.context_state;
+    contextReason =
+      typeof payload.context_reason === "string" ? payload.context_reason.trim().slice(0, 320) : "";
+    glass = payload.glass ?? false;
+    visible = true;
+    leaving = false;
+
+    if (!sameSession) {
+      submitting = false;
+      transcribing = false;
+      instruction = "";
+      transcript = "";
+      transcriptItems = [];
+      error = "";
+      nativeStateSeen = false;
+      replyPhase = "reading";
+    }
+
+    clearTimer(focusTimer);
+    focusTimer = null;
+    resetIdleTimer();
+    reportContentHeight();
+
+    if (mode === "reply") {
+      if (contextState === "available" && autoSubmittedReplySession !== sessionId) {
+        autoSubmittedReplySession = sessionId;
+        void submit("");
+      }
+      return;
+    }
+    focusEditor();
+  }
+
   async function close(reason: "blur" | "esc" | "timeout" | "button"): Promise<void> {
     clearTimer(idleTimer);
-    await invokeCommand(COMMANDS.editClose, { reason }).catch(() => undefined);
+    if (!Number.isSafeInteger(sessionId) || sessionId <= 0) return;
+    const closingSessionId = sessionId;
+    await invokeCommand(COMMANDS.editClose, {
+      sessionId: closingSessionId,
+      reason
+    }).catch(() => undefined);
   }
 
   onMount(() => {
     const unlisteners: Array<() => void> = [];
     let disposed = false;
     const listeners = [
-      listenEvent<EditInitPayload>(EVENTS.editInit, (payload) => {
-        glass = payload?.glass ?? false;
-        visible = true;
-        leaving = false;
-        submitting = false;
-        transcribing = false;
-        instruction = "";
-        transcript = "";
-        transcriptItems = [];
-        error = "";
-        nativeStateSeen = false;
-        focusEditor();
-        resetIdleTimer();
-        reportContentHeight();
-      }),
+      listenEvent<EditInitPayload>(EVENTS.editInit, applyInit),
       listenEvent<EditStatePayload>(EVENTS.editState, (payload) => {
+        if (payload?.session_id !== sessionId) return;
         submitting = payload?.state === "thinking";
         nativeStateSeen = submitting;
+        if (mode === "reply" && submitting) replyPhase = "drafting";
         if (!submitting) {
           error = payload?.error ?? "";
           instruction = "";
           transcript = "";
           transcriptItems = [];
-          focusEditor();
+          if (mode === "reply") replyPhase = "failed";
+          else focusEditor();
         }
         resetIdleTimer();
         reportContentHeight();
       }),
-      listenEvent(EVENTS.editFadeout, () => {
+      listenEvent<EditFadeoutPayload>(EVENTS.editFadeout, (payload) => {
+        if (payload?.session_id !== sessionId) return;
         leaving = true;
         visible = false;
         clearTimer(idleTimer);
       }),
-      listenEvent<{ scope?: "selection" | "draft" }>(EVENTS.editContext, (payload) => {
-        if (payload?.scope === "selection" || payload?.scope === "draft") scope = payload.scope;
-      }),
-      listenEvent<{ reason?: string }>(EVENTS.inlineRefused, (payload) => {
+      listenEvent<InlineRefusedPayload>(EVENTS.inlineRefused, (payload) => {
+        if (payload?.session_id !== undefined && payload.session_id !== sessionId) return;
         error = refusalMessage(payload?.reason ?? "");
         reportContentHeight();
       }),
       listenEvent(EVENTS.transcriptionStart, () => {
-        if (!visible) return;
+        if (!visible || mode === "reply") return;
         transcribing = true;
         transcript = "";
         transcriptItems = [];
@@ -273,47 +365,63 @@
 
 <main class:visible class:leaving class:native-glass={glass} class="edit glass">
   <header class="drag-region">
-    <div><Mascot size={43} mood={submitting ? "thinking" : "calm"} /><span><b>Rewrite with woof</b><small>{scope === "selection" ? "Selection" : "Whole draft"}</small></span></div>
+    <div><Mascot size={43} mood={submitting ? "thinking" : "calm"} /><span><b>{titleForMode(mode)}</b><small>{subtitleForMode(mode)}</small></span></div>
     <button class="no-drag" onclick={() => void close("button")} aria-label="Close"><X size={14} /></button>
   </header>
 
   <section>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
-    <label>
-      <span class="visually-hidden">Rewrite instruction</span>
-      <textarea
-        bind:this={editor}
-        bind:value={instruction}
-        placeholder={transcribing ? transcript || "Listening…" : submitting ? "Working on it…" : "Make this warmer, clearer, shorter…"}
-        disabled={submitting || transcribing}
-        oninput={() => {
-          resetIdleTimer();
-          reportContentHeight();
-        }}
-        onkeydown={(event) => {
-          if (event.key === "Enter" && !event.shiftKey) {
-            event.preventDefault();
-            void submit();
-          }
-        }}
-      ></textarea>
-      <button class:ready={instruction.trim().length > 0} disabled={!instruction.trim() || submitting} onclick={submit}>
-        {#if submitting}<span class="spinner"></span>{:else}<ArrowUp size={16} />{/if}
-      </button>
-    </label>
-    <div class="scope">
-      <button class:active={scope === "selection"} onclick={() => (scope = "selection")}>
-        {#if scope === "selection"}<Check size={11} />{/if} Selection
-      </button>
-      <button class:active={scope === "draft"} onclick={() => (scope = "draft")}>
-        {#if scope === "draft"}<Check size={11} />{/if} Whole draft
-      </button>
-    </div>
+    {#if mode === "reply"}
+      {#if contextState === "available"}
+        <div class:failed={replyPhase === "failed"} class="reply-status" role="status" aria-live="polite">
+          <Sparkles size={16} />
+          <span>
+            <b>{replyPhase === "drafting" ? "Drafting your reply…" : replyPhase === "failed" ? "Reply not inserted" : "Reading recent context…"}</b>
+            <small>{replyPhase === "failed" ? "Double-tap again to retry." : "woof will insert a draft into the empty composer."}</small>
+          </span>
+        </div>
+      {:else}
+        <div class="context-unavailable" role="alert">
+          <b>Reply context unavailable</b>
+          <span>{contextUnavailableCopy()}</span>
+          <small>Keep the conversation visible, then double-tap again to retry.</small>
+        </div>
+      {/if}
+    {:else}
+      <label>
+        <span class="visually-hidden">Rewrite instruction</span>
+        <textarea
+          bind:this={editor}
+          bind:value={instruction}
+          placeholder={transcribing ? transcript || "Listening…" : submitting ? "Working on it…" : "Make this warmer, clearer, shorter…"}
+          disabled={submitting || transcribing}
+          oninput={() => {
+            resetIdleTimer();
+            reportContentHeight();
+          }}
+          onkeydown={(event) => {
+            if (event.key === "Enter" && !event.shiftKey) {
+              event.preventDefault();
+              void submit();
+            }
+          }}
+        ></textarea>
+        <button
+          aria-label="Rewrite and insert"
+          class:ready={instruction.trim().length > 0}
+          disabled={!instruction.trim() || submitting || transcribing}
+          onclick={() => void submit()}
+        >
+          {#if submitting}<span class="spinner"></span>{:else}<ArrowUp size={16} />{/if}
+        </button>
+      </label>
+    {/if}
   </section>
 
   <footer>
-    <span><Sparkles size={11} /> Style learns only when you explicitly ask</span>
-    <span><kbd><CornerDownLeft size={10} /></kbd> rewrite</span>
+    <span><Sparkles size={11} /> {footerContextCopy()}</span>
+    {#if mode !== "reply"}<span><kbd><CornerDownLeft size={10} /></kbd> insert only</span>{/if}
+    <span>woof never sends</span>
     <span><kbd><Command size={10} /> .</kbd> cancel</span>
   </footer>
 </main>
@@ -405,6 +513,58 @@
     line-height: 1.35;
   }
 
+  .reply-status,
+  .context-unavailable {
+    min-height: 89px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: 15px;
+    background: color-mix(in srgb, var(--cream) 79%, transparent);
+    box-shadow: 0 5px 18px rgba(74, 50, 40, 0.07);
+  }
+
+  .reply-status > span,
+  .context-unavailable > span,
+  .reply-status b,
+  .reply-status small,
+  .context-unavailable b,
+  .context-unavailable small {
+    display: block;
+  }
+
+  .reply-status > span {
+    min-width: 0;
+  }
+
+  .reply-status b,
+  .context-unavailable b {
+    color: var(--ink);
+    font-size: 10px;
+  }
+
+  .reply-status small,
+  .context-unavailable span,
+  .context-unavailable small {
+    margin-top: 4px;
+    color: var(--ink-faint);
+    font-size: 8px;
+    line-height: 1.4;
+  }
+
+  .reply-status.failed {
+    border-color: color-mix(in srgb, #c7534f 28%, transparent);
+  }
+
+  .context-unavailable {
+    align-items: flex-start;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0;
+  }
+
   section > label {
     min-height: 89px;
     display: grid;
@@ -447,32 +607,8 @@
     background: var(--brown);
   }
 
-  .scope {
-    display: flex;
-    gap: 6px;
-    margin-top: 8px;
-  }
-
-  .scope button {
-    min-width: 68px;
-    height: 25px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 4px;
-    padding: 0 8px;
-    border: 1px solid transparent;
-    border-radius: 8px;
-    color: var(--ink-faint);
-    background: transparent;
-    font-size: 7.5px;
-    cursor: pointer;
-  }
-
-  .scope button.active {
-    border-color: color-mix(in srgb, var(--fawn) 24%, transparent);
-    color: var(--fawn-deep);
-    background: color-mix(in srgb, var(--fawn) 8%, transparent);
+  label button:disabled {
+    cursor: default;
   }
 
   footer {

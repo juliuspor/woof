@@ -191,6 +191,7 @@ mod tests {
             app_name: "Safari".into(),
             bundle_id: Some("com.apple.Safari".into()),
             window_title: Some("Private payroll".into()),
+            window_id: None,
             browser_url: Some("https://secret.example.com/report".into()),
             secure_input: false,
             root: AccessibilityNode::default(),

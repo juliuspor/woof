@@ -76,6 +76,7 @@ impl AccessibilityProvider for SyntheticProvider {
                 app_name: "TextEdit".to_string(),
                 bundle_id: Some("com.apple.TextEdit".to_string()),
                 window_title: Some("Synthetic capture".to_string()),
+                window_id: None,
                 browser_url: None,
                 secure_input: false,
                 root: AccessibilityNode {
@@ -185,6 +186,7 @@ impl AccessibilityProvider for MetadataPreflightProvider {
             app_name: self.app_name.to_owned(),
             bundle_id: Some(self.bundle_id.to_owned()),
             window_title: self.window_title.map(str::to_owned),
+            window_id: None,
             browser_url: self.browser_url.map(str::to_owned),
         };
         let captured = capture_after_preflight(metadata, policy, || {
@@ -216,6 +218,7 @@ fn scripted_capture(captured_at_ms: i64) -> RawCapture {
         app_name: "TextEdit".to_string(),
         bundle_id: Some("com.apple.TextEdit".to_string()),
         window_title: Some("Capture discontinuity fixture".to_string()),
+        window_id: None,
         browser_url: None,
         secure_input: false,
         root: AccessibilityNode {

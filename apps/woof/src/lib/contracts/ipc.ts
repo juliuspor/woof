@@ -141,7 +141,6 @@ export const EVENTS = {
   editInit: "woof:edit-init",
   editState: "woof:edit-state",
   editFadeout: "woof:edit-fadeout",
-  editContext: "woof:edit-context",
   inlineRefused: "woof:inline-refused",
   willRetract: "woof:will-retract",
   chatState: "woof:chat-state",
@@ -232,13 +231,34 @@ export interface CaretStatusPayload {
   text: string;
 }
 
+export interface CaretFadeoutPayload {
+  session_id: number;
+}
+
+export type InlineEditMode = "reply" | "selection" | "draft";
+export type InlineContextState = "available" | "unavailable";
+
 export interface EditInitPayload {
   glass?: boolean;
+  session_id: number;
+  mode: InlineEditMode;
+  context_state: InlineContextState;
+  context_reason?: string | null;
 }
 
 export interface EditStatePayload {
+  session_id: number;
   state: string;
   error?: string | null;
+}
+
+export interface EditFadeoutPayload {
+  session_id: number;
+}
+
+export interface InlineRefusedPayload {
+  session_id?: number;
+  reason?: string;
 }
 
 export interface TranscriptionStartPayload {

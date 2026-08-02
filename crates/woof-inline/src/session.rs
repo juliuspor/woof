@@ -1,18 +1,38 @@
 use crate::{
     with_temporary_text, Clipboard, DeliveryFocus, DeliveryMethod, FallbackTarget,
-    FocusedElementMetadata, InlineError, InlineRead, ReplacementAttempt, TextScope, WakeHint,
+    FocusedElementMetadata, InlineError, InlineRead, PreviewWriteError, ReplacementAttempt,
+    TextScope, WakeHint,
 };
 
 pub trait FocusedTextTarget: Send {
     fn metadata(&self) -> Result<FocusedElementMetadata, InlineError>;
     fn read(&self, scope: TextScope) -> Result<InlineRead, InlineError>;
     fn validate(&self, expected: &InlineRead, focus: DeliveryFocus) -> Result<(), InlineError>;
+    fn validate_controller_focus(&self, controller_pid: i32) -> Result<(), InlineError>;
     fn replace(
         &mut self,
         expected: &InlineRead,
         replacement: &str,
         focus: DeliveryFocus,
     ) -> Result<ReplacementAttempt, InlineError>;
+    /// Replace a whole draft through Accessibility only and return the exact
+    /// observed revision. This is used for short-lived, session-owned reply
+    /// progress text and deliberately has no clipboard or keyboard fallback.
+    fn replace_whole_draft_preview(
+        &mut self,
+        expected_text: &str,
+        replacement: &str,
+        controller_pid: i32,
+    ) -> Result<InlineRead, PreviewWriteError>;
+    /// Restore a session-owned preview only when the retained element still
+    /// contains that exact revision. Cleanup never claims unrelated focus and
+    /// never overwrites user edits.
+    fn restore_whole_draft_preview(
+        &mut self,
+        expected_previews: &[&str],
+        original: &InlineRead,
+        controller_pid: i32,
+    ) -> Result<InlineRead, InlineError>;
     fn prepare_fallback(
         &mut self,
         expected: &InlineRead,
@@ -24,9 +44,12 @@ pub trait FocusedTextTarget: Send {
         expected: &InlineRead,
         fallback: FallbackTarget,
     ) -> Result<(), InlineError>;
+    fn confirm_whole_draft(&self, replacement: &str) -> Result<(), InlineError>;
     fn release(&mut self);
 }
 
+/// Insertion-only keyboard fallback. This interface intentionally exposes no
+/// Return, Enter, or submit action.
 pub trait InputInjector: Send {
     fn paste(&mut self, pid: i32) -> Result<(), InlineError>;
     fn type_unicode(&mut self, pid: i32, value: &str) -> Result<(), InlineError>;
@@ -69,6 +92,16 @@ where
         self.target.read(scope)
     }
 
+    pub fn validate(&self, expected: &InlineRead, focus: DeliveryFocus) -> Result<(), InlineError> {
+        self.ensure_active()?;
+        self.target.validate(expected, focus)
+    }
+
+    pub fn validate_controller_focus(&self, controller_pid: i32) -> Result<(), InlineError> {
+        self.ensure_active()?;
+        self.target.validate_controller_focus(controller_pid)
+    }
+
     pub fn deliver(
         &mut self,
         expected: &InlineRead,
@@ -81,7 +114,7 @@ where
         if let Some(method) =
             Option::<DeliveryMethod>::from(self.target.replace(expected, replacement, focus)?)
         {
-            return Ok(method);
+            return self.confirm_delivery(expected, replacement, method);
         }
 
         let fallback = self.target.prepare_fallback(expected, wake_hint, focus)?;
@@ -89,13 +122,13 @@ where
         if replacement.is_empty() {
             self.target.validate_fallback(expected, fallback)?;
             self.input.type_unicode(fallback.pid, replacement)?;
-            return Ok(DeliveryMethod::UnicodeKeystrokes);
+            return self.confirm_delivery(expected, replacement, DeliveryMethod::UnicodeKeystrokes);
         }
         match with_temporary_text(&mut self.clipboard, replacement, || {
             self.target.validate_fallback(expected, fallback)?;
             self.input.paste(fallback.pid)
         }) {
-            Ok(()) => Ok(DeliveryMethod::ClipboardPaste),
+            Ok(()) => self.confirm_delivery(expected, replacement, DeliveryMethod::ClipboardPaste),
             Err(InlineError::ClipboardRestore) => Err(InlineError::ClipboardRestore),
             Err(
                 InlineError::ClipboardSnapshot
@@ -105,10 +138,45 @@ where
             ) => {
                 self.target.validate_fallback(expected, fallback)?;
                 self.input.type_unicode(fallback.pid, replacement)?;
-                Ok(DeliveryMethod::UnicodeKeystrokes)
+                self.confirm_delivery(expected, replacement, DeliveryMethod::UnicodeKeystrokes)
             }
             Err(error) => Err(error),
         }
+    }
+
+    pub fn replace_whole_draft_preview(
+        &mut self,
+        expected_text: &str,
+        replacement: &str,
+        controller_pid: i32,
+    ) -> Result<InlineRead, PreviewWriteError> {
+        self.ensure_active()
+            .map_err(PreviewWriteError::before_write)?;
+        self.target
+            .replace_whole_draft_preview(expected_text, replacement, controller_pid)
+    }
+
+    pub fn restore_whole_draft_preview(
+        &mut self,
+        expected_previews: &[&str],
+        original: &InlineRead,
+        controller_pid: i32,
+    ) -> Result<InlineRead, InlineError> {
+        self.ensure_active()?;
+        self.target
+            .restore_whole_draft_preview(expected_previews, original, controller_pid)
+    }
+
+    fn confirm_delivery(
+        &self,
+        expected: &InlineRead,
+        replacement: &str,
+        method: DeliveryMethod,
+    ) -> Result<DeliveryMethod, InlineError> {
+        if expected.scope == TextScope::WholeDraft {
+            self.target.confirm_whole_draft(replacement)?;
+        }
+        Ok(method)
     }
 
     pub fn cancel(&mut self) -> Result<(), InlineError> {
@@ -156,6 +224,7 @@ mod tests {
     struct FakeTarget {
         attempt: ReplacementAttempt,
         current: InlineRead,
+        confirmed_whole_draft: Option<String>,
         focus_valid: bool,
         validations: Arc<Mutex<usize>>,
         released: Arc<Mutex<bool>>,
@@ -186,6 +255,14 @@ mod tests {
             }
         }
 
+        fn validate_controller_focus(&self, _controller_pid: i32) -> Result<(), InlineError> {
+            if self.focus_valid {
+                Ok(())
+            } else {
+                Err(InlineError::TargetFocusChanged)
+            }
+        }
+
         fn replace(
             &mut self,
             expected: &InlineRead,
@@ -194,6 +271,51 @@ mod tests {
         ) -> Result<ReplacementAttempt, InlineError> {
             self.validate(expected, focus)?;
             Ok(self.attempt)
+        }
+
+        fn replace_whole_draft_preview(
+            &mut self,
+            expected_text: &str,
+            replacement: &str,
+            controller_pid: i32,
+        ) -> Result<InlineRead, PreviewWriteError> {
+            self.validate_controller_focus(controller_pid)
+                .map_err(PreviewWriteError::before_write)?;
+            if self.current.scope != TextScope::WholeDraft {
+                return Err(PreviewWriteError::before_write(InlineError::NotWritable));
+            }
+            if self.current.text != expected_text {
+                return Err(PreviewWriteError::before_write(
+                    InlineError::TargetContentChanged,
+                ));
+            }
+            self.current.text = replacement.to_owned();
+            let caret = self.current.selection.map(|_| Utf16Range {
+                location: replacement.encode_utf16().count(),
+                length: 0,
+            });
+            self.current.selection = caret;
+            self.current.metadata.selection = caret;
+            Ok(self.current.clone())
+        }
+
+        fn restore_whole_draft_preview(
+            &mut self,
+            expected_previews: &[&str],
+            original: &InlineRead,
+            controller_pid: i32,
+        ) -> Result<InlineRead, InlineError> {
+            if self.current.text == original.text {
+                return Ok(self.current.clone());
+            }
+            if !expected_previews.contains(&self.current.text.as_str()) {
+                return Err(InlineError::TargetContentChanged);
+            }
+            self.validate_controller_focus(controller_pid)?;
+            self.current.text = original.text.clone();
+            self.current.selection = original.selection;
+            self.current.metadata.selection = original.metadata.selection;
+            Ok(self.current.clone())
         }
 
         fn prepare_fallback(
@@ -215,6 +337,16 @@ mod tests {
             _fallback: FallbackTarget,
         ) -> Result<(), InlineError> {
             self.validate(expected, DeliveryFocus::Target)
+        }
+
+        fn confirm_whole_draft(&self, replacement: &str) -> Result<(), InlineError> {
+            if self.current.text == replacement
+                || self.confirmed_whole_draft.as_deref() == Some(replacement)
+            {
+                Ok(())
+            } else {
+                Err(InlineError::DeliveryUnconfirmed)
+            }
         }
 
         fn release(&mut self) {
@@ -286,12 +418,13 @@ mod tests {
 
     struct FakeInput {
         counts: Arc<Mutex<InputCounts>>,
+        paste_error: Option<InlineError>,
     }
 
     impl InputInjector for FakeInput {
         fn paste(&mut self, _pid: i32) -> Result<(), InlineError> {
             self.counts.lock().unwrap().pasted += 1;
-            Ok(())
+            self.paste_error.map_or(Ok(()), Err)
         }
 
         fn type_unicode(&mut self, _pid: i32, _value: &str) -> Result<(), InlineError> {
@@ -317,6 +450,57 @@ mod tests {
         }
     }
 
+    fn delivery_session(
+        expected: &InlineRead,
+        attempt: ReplacementAttempt,
+        confirmed_whole_draft: Option<&str>,
+        paste_error: Option<InlineError>,
+    ) -> (
+        InlineSession<FakeTarget, FakeClipboard, FakeInput>,
+        Arc<Mutex<InputCounts>>,
+    ) {
+        let counts = Arc::new(Mutex::new(InputCounts::default()));
+        (
+            InlineSession::new(
+                FakeTarget {
+                    attempt,
+                    current: expected.clone(),
+                    confirmed_whole_draft: confirmed_whole_draft.map(str::to_owned),
+                    focus_valid: true,
+                    validations: Arc::new(Mutex::new(0)),
+                    released: Arc::new(Mutex::new(false)),
+                },
+                FakeClipboard {
+                    current: Arc::new(Mutex::new(ClipboardSnapshot::default())),
+                    revision: 1,
+                },
+                FakeInput {
+                    counts: Arc::clone(&counts),
+                    paste_error,
+                },
+            ),
+            counts,
+        )
+    }
+
+    #[test]
+    fn whole_draft_preview_and_restore_never_use_clipboard_or_input_fallbacks() {
+        let original = expected_read(TextScope::WholeDraft);
+        let (mut session, counts) =
+            delivery_session(&original, ReplacementAttempt::Unavailable, None, None);
+
+        let preview = session
+            .replace_whole_draft_preview(&original.text, "generating.", 7)
+            .unwrap();
+        assert_eq!(preview.text, "generating.");
+        let restored = session
+            .restore_whole_draft_preview(&["generating."], &original, 7)
+            .unwrap();
+        assert_eq!(restored.text, original.text);
+        assert_eq!(counts.lock().unwrap().pasted, 0);
+        assert_eq!(counts.lock().unwrap().typed, 0);
+    }
+
     #[test]
     fn prefers_accessibility_replacement_without_touching_clipboard() {
         let original = ClipboardSnapshot::default();
@@ -329,6 +513,7 @@ mod tests {
             FakeTarget {
                 attempt: ReplacementAttempt::SelectedText,
                 current: expected.clone(),
+                confirmed_whole_draft: None,
                 focus_valid: true,
                 validations: Arc::clone(&validations),
                 released,
@@ -339,6 +524,7 @@ mod tests {
             },
             FakeInput {
                 counts: Arc::clone(&input_counts),
+                paste_error: None,
             },
         );
         assert_eq!(
@@ -379,6 +565,7 @@ mod tests {
             FakeTarget {
                 attempt: ReplacementAttempt::Unavailable,
                 current: expected.clone(),
+                confirmed_whole_draft: Some("replacement".into()),
                 focus_valid: true,
                 validations: Arc::clone(&validations),
                 released: Arc::clone(&released),
@@ -389,6 +576,7 @@ mod tests {
             },
             FakeInput {
                 counts: Arc::clone(&input_counts),
+                paste_error: None,
             },
         );
         assert_eq!(
@@ -413,6 +601,67 @@ mod tests {
     }
 
     #[test]
+    fn ignored_accessibility_whole_draft_write_is_not_reported_as_delivered() {
+        let expected = expected_read(TextScope::WholeDraft);
+        let (mut session, counts) =
+            delivery_session(&expected, ReplacementAttempt::Value, None, None);
+
+        assert_eq!(
+            session.deliver(
+                &expected,
+                "replacement",
+                WakeHint::Standard,
+                DeliveryFocus::Target,
+            ),
+            Err(InlineError::DeliveryUnconfirmed)
+        );
+        assert_eq!(counts.lock().unwrap().pasted, 0);
+        assert_eq!(counts.lock().unwrap().typed, 0);
+    }
+
+    #[test]
+    fn dropped_clipboard_paste_is_not_reported_as_delivered() {
+        let expected = expected_read(TextScope::WholeDraft);
+        let (mut session, counts) =
+            delivery_session(&expected, ReplacementAttempt::Unavailable, None, None);
+
+        assert_eq!(
+            session.deliver(
+                &expected,
+                "replacement",
+                WakeHint::Standard,
+                DeliveryFocus::Target,
+            ),
+            Err(InlineError::DeliveryUnconfirmed)
+        );
+        assert_eq!(counts.lock().unwrap().pasted, 1);
+        assert_eq!(counts.lock().unwrap().typed, 0);
+    }
+
+    #[test]
+    fn ignored_unicode_fallback_is_not_reported_as_delivered() {
+        let expected = expected_read(TextScope::WholeDraft);
+        let (mut session, counts) = delivery_session(
+            &expected,
+            ReplacementAttempt::Unavailable,
+            None,
+            Some(InlineError::InputInjection),
+        );
+
+        assert_eq!(
+            session.deliver(
+                &expected,
+                "replacement",
+                WakeHint::Standard,
+                DeliveryFocus::Target,
+            ),
+            Err(InlineError::DeliveryUnconfirmed)
+        );
+        assert_eq!(counts.lock().unwrap().pasted, 1);
+        assert_eq!(counts.lock().unwrap().typed, 1);
+    }
+
+    #[test]
     fn stale_content_is_rejected_before_any_fallback_or_input() {
         let expected = expected_read(TextScope::Selection);
         let mut current = expected.clone();
@@ -423,6 +672,7 @@ mod tests {
             FakeTarget {
                 attempt: ReplacementAttempt::Unavailable,
                 current,
+                confirmed_whole_draft: None,
                 focus_valid: true,
                 validations: Arc::new(Mutex::new(0)),
                 released,
@@ -433,6 +683,7 @@ mod tests {
             },
             FakeInput {
                 counts: Arc::clone(&counts),
+                paste_error: None,
             },
         );
         assert_eq!(
@@ -456,6 +707,7 @@ mod tests {
             FakeTarget {
                 attempt: ReplacementAttempt::SelectedText,
                 current: expected.clone(),
+                confirmed_whole_draft: None,
                 focus_valid: false,
                 validations: Arc::new(Mutex::new(0)),
                 released: Arc::new(Mutex::new(false)),
@@ -466,6 +718,7 @@ mod tests {
             },
             FakeInput {
                 counts: Arc::clone(&counts),
+                paste_error: None,
             },
         );
         assert_eq!(
