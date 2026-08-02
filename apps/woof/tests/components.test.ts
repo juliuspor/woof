@@ -71,38 +71,226 @@ describe("desktop surfaces", () => {
     expect(screen.queryByRole("button", { name: "Open woof" })).not.toBeInTheDocument();
   });
 
-  it("ignores collapsed hover and passively opens the blank tab on click", async () => {
+  it("opens and closes the passive companion on hover when enabled", async () => {
     vi.useFakeTimers();
+    window.localStorage.setItem(
+      `woof:command:${COMMANDS.companionGetHoverOpen}`,
+      "true"
+    );
     const invoke = vi.spyOn(bridge, "invokeCommand");
     render(Companion, { mode: "collapsed" });
     const shell = screen.getByTestId("companion-shell");
+    await vi.advanceTimersByTimeAsync(0);
 
-    await fireEvent.pointerEnter(shell);
-    await vi.advanceTimersByTimeAsync(3_000);
-    expect(shell).toHaveAttribute("data-state", "collapsed");
-
-    await fireEvent.click(screen.getByRole("button", { name: "Open woof" }));
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await fireEvent.mouseEnter(shell);
     await vi.advanceTimersByTimeAsync(0);
     expect(invoke).toHaveBeenCalledWith(COMMANDS.companionSetState, {
-      state: "expanded"
+      state: "expanded",
+      requestId: expect.any(Number)
     });
-    expect(invoke).not.toHaveBeenCalledWith(COMMANDS.companionOpenFocused);
+    expect(
+      invoke.mock.calls.some(([command]) => command === COMMANDS.companionOpenFocused)
+    ).toBe(false);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === COMMANDS.companionSetState)
+    ).toHaveLength(1);
     expect(shell).toHaveAttribute("data-state", "expanded");
     const chat = screen.getByRole("region", { name: "woof chat" });
-    expect(chat).not.toHaveClass("visible");
+    expect(chat).toHaveClass("visible");
     expect(screen.getByRole("textbox", { name: "Message woof" })).not.toHaveFocus();
 
-    await vi.advanceTimersByTimeAsync(200);
-    expect(chat).toHaveClass("visible");
-
-    await fireEvent.pointerLeave(shell);
-    await vi.advanceTimersByTimeAsync(249);
+    await fireEvent.mouseLeave(shell);
+    await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay);
     expect(shell).toHaveAttribute("data-state", "expanded");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    await vi.advanceTimersByTimeAsync(119);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
     await vi.advanceTimersByTimeAsync(1);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    await vi.advanceTimersByTimeAsync(120);
     expect(shell).toHaveAttribute("data-state", "collapsed");
 
-    await fireEvent.pointerEnter(shell);
-    await vi.advanceTimersByTimeAsync(3_000);
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+  });
+
+  it("opens when native pointer truth arrives before the hover preference", async () => {
+    vi.useFakeTimers();
+    const nativeInvoke = bridge.invokeCommand;
+    let resolveHover!: (enabled: boolean) => void;
+    const invoke = vi.spyOn(bridge, "invokeCommand").mockImplementation(
+      (command, args = {}) => {
+        if (command === COMMANDS.companionGetHoverOpen) {
+          return new Promise<boolean>((resolve) => {
+            resolveHover = resolve;
+          });
+        }
+        if (command === COMMANDS.companionGetPosition) {
+          return Promise.reject(new Error("position unavailable"));
+        }
+        return nativeInvoke(command, args);
+      }
+    );
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      invoke.mock.calls.some(([command]) => command === COMMANDS.companionSetState)
+    ).toBe(false);
+
+    resolveHover(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invoke).toHaveBeenCalledWith(COMMANDS.companionSetState, {
+      state: "expanded",
+      requestId: expect.any(Number)
+    });
+    expect(screen.getByTestId("companion-shell")).toHaveAttribute(
+      "data-state",
+      "expanded"
+    );
+  });
+
+  it("opens from the listener-ready native pointer snapshot without a DOM hover", async () => {
+    vi.useFakeTimers();
+    window.localStorage.setItem("woof:test:pointer-inside", "true");
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(invoke).toHaveBeenCalledWith(COMMANDS.companionPointerReady);
+    expect(screen.getByTestId("companion-shell")).toHaveAttribute(
+      "data-state",
+      "expanded"
+    );
+  });
+
+  it("keeps a manual collapse closed until the pointer leaves and re-enters", async () => {
+    vi.useFakeTimers();
+    window.localStorage.setItem("woof:test:pointer-inside", "true");
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+    const shell = screen.getByTestId("companion-shell");
+    expect(shell).toHaveAttribute("data-state", "expanded");
+
+    await fireEvent.click(screen.getByRole("button", { name: "Collapse" }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell).toHaveAttribute("data-state", "collapsed");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay * 2);
+    expect(shell).toHaveAttribute("data-state", "collapsed");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+  });
+
+  it("serializes a deferred hover open behind the newer collapse intent", async () => {
+    vi.useFakeTimers();
+    window.localStorage.setItem("woof:test:pointer-inside", "true");
+    const nativeInvoke = bridge.invokeCommand;
+    let resolveOpen!: () => void;
+    const invoke = vi.spyOn(bridge, "invokeCommand").mockImplementation(
+      (command, args = {}) => {
+        if (command === COMMANDS.companionSetState) {
+          return new Promise<void>((resolve) => {
+            resolveOpen = resolve;
+          });
+        }
+        return nativeInvoke(command, args);
+      }
+    );
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+    const shell = screen.getByTestId("companion-shell");
+    expect(shell).toHaveAttribute("data-state", "expanded");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay);
+    expect(shell).toHaveAttribute("data-state", "collapsed");
+    expect(
+      invoke.mock.calls.some(([command]) => command === COMMANDS.companionRollup)
+    ).toBe(false);
+
+    resolveOpen();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      invoke.mock.calls.some(([command]) => command === COMMANDS.companionRollup)
+    ).toBe(true);
+    expect(shell).toHaveAttribute("data-state", "collapsed");
+  });
+
+  it("reopens after a deferred collapse and ignores its stale completion", async () => {
+    vi.useFakeTimers();
+    window.localStorage.setItem("woof:test:pointer-inside", "true");
+    const nativeInvoke = bridge.invokeCommand;
+    let resolveCollapse!: () => void;
+    const invoke = vi.spyOn(bridge, "invokeCommand").mockImplementation(
+      (command, args = {}) => {
+        if (command === COMMANDS.companionRollup) {
+          return new Promise<void>((resolve) => {
+            resolveCollapse = resolve;
+          });
+        }
+        return nativeInvoke(command, args);
+      }
+    );
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+    const shell = screen.getByTestId("companion-shell");
+    expect(shell).toHaveAttribute("data-state", "expanded");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay);
+    expect(shell).toHaveAttribute("data-state", "collapsed");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: true }));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+    expect(
+      invoke.mock.calls.filter(([command]) => command === COMMANDS.companionSetState)
+    ).toHaveLength(1);
+
+    resolveCollapse();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(
+      invoke.mock.calls.filter(([command]) => command === COMMANDS.companionSetState)
+    ).toHaveLength(2);
+    expect(shell).toHaveAttribute("data-state", "expanded");
+  });
+
+  it("retracts a click-opened companion after the native pointer leaves", async () => {
+    vi.useFakeTimers();
+    window.localStorage.setItem(
+      `woof:command:${COMMANDS.companionGetHoverOpen}`,
+      "false"
+    );
+    window.localStorage.setItem("woof:test:pointer-inside", "true");
+    const invoke = vi.spyOn(bridge, "invokeCommand");
+    render(Companion, { mode: "collapsed" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    await fireEvent.click(screen.getByRole("button", { name: "Open woof" }), { detail: 1 });
+    await vi.advanceTimersByTimeAsync(0);
+    const shell = screen.getByTestId("companion-shell");
+    expect(shell).toHaveAttribute("data-state", "expanded");
+
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: false }));
+    await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay);
+    expect(invoke).toHaveBeenCalledWith(COMMANDS.companionRollup, {
+      durationMs: MOTION.panelExit,
+      requestId: expect.any(Number)
+    });
     expect(shell).toHaveAttribute("data-state", "collapsed");
   });
 
@@ -116,11 +304,14 @@ describe("desktop surfaces", () => {
     window.dispatchEvent(new CustomEvent("woof:open-chat"));
     await vi.advanceTimersByTimeAsync(30);
 
-    expect(invoke).toHaveBeenCalledWith(COMMANDS.companionOpenFocused);
+    expect(invoke).toHaveBeenCalledWith(COMMANDS.companionOpenFocused, {
+      requestId: expect.any(Number)
+    });
     expect(shell).toHaveAttribute("data-state", "expanded");
     expect(screen.getByRole("textbox", { name: "Message woof" })).toHaveFocus();
 
-    await fireEvent.pointerLeave(shell);
+    await fireEvent.mouseEnter(shell);
+    await fireEvent.mouseLeave(shell);
     await vi.advanceTimersByTimeAsync(MOTION.hoverCloseDelay + MOTION.panelExit);
     expect(shell).toHaveAttribute("data-state", "expanded");
   });
@@ -586,7 +777,7 @@ describe("desktop surfaces", () => {
     expect(grip.querySelectorAll("i")).toHaveLength(6);
   });
 
-  it("restores the paused capture UI when native resume fails", async () => {
+  it("restores the paused capture UI and explains when native resume fails", async () => {
     const nativeInvoke = bridge.invokeCommand;
     const invoke = vi.spyOn(bridge, "invokeCommand").mockImplementation(
       (command, args = {}) => {
@@ -602,7 +793,7 @@ describe("desktop surfaces", () => {
     await fireEvent.click(screen.getByRole("button", { name: "Resume" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Capture is paused")).toBeInTheDocument();
+      expect(screen.getByText("capture resume failed")).toBeInTheDocument();
     });
     expect(invoke).toHaveBeenCalledWith(COMMANDS.captureResume);
   });
@@ -832,6 +1023,35 @@ describe("desktop surfaces", () => {
     expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
   });
 
+  it("shows the reason when resuming capture from settings fails", async () => {
+    window.localStorage.setItem("woof:command:capture_is_paused", "true");
+    window.localStorage.setItem(
+      "woof:command:capture_status",
+      JSON.stringify({
+        paused: true,
+        capturing: false,
+        runtime: { running: true, permission: "denied", last_error: "accessibility" }
+      })
+    );
+    const nativeInvoke = bridge.invokeCommand;
+    vi.spyOn(bridge, "invokeCommand").mockImplementation((command, args = {}) => {
+      if (command === COMMANDS.captureResume) {
+        return Promise.reject(
+          new Error("Accessibility is not ready in the local capture service")
+        );
+      }
+      return nativeInvoke(command, args);
+    });
+
+    render(SettingsPanel, { embedded: true, dock: true });
+    await fireEvent.click(screen.getByRole("button", { name: "Memory" }));
+    await fireEvent.click(await screen.findByRole("button", { name: "Resume" }));
+
+    expect(
+      await screen.findByText("Accessibility is not ready in the local capture service")
+    ).toHaveAttribute("role", "alert");
+  });
+
   it("loads and saves local nudge notification preferences", async () => {
     window.localStorage.setItem("woof:command:get_nudges_enabled", "false");
     render(SettingsPanel, { embedded: true, dock: true });
@@ -941,6 +1161,28 @@ describe("desktop surfaces", () => {
     expect(vi.getTimerCount()).toBe(1);
     panel.unmount();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("does not call two granted Accessibility entries not granted while the service restarts", async () => {
+    window.localStorage.setItem(
+      "woof:command:accessibility_status",
+      JSON.stringify({
+        app_trusted: true,
+        capture_service_trusted: true,
+        capture_service_operational: false,
+        ready: false,
+        next_request: null
+      })
+    );
+
+    render(SettingsPanel, { embedded: true, dock: true });
+
+    const accessibility = await screen.findByRole("button", { name: /Accessibility/i });
+    await waitFor(() => {
+      expect(within(accessibility).getByText("Restart needed")).toBeInTheDocument();
+      expect(within(accessibility).getByText("woof granted · capture service granted"))
+        .toBeInTheDocument();
+    });
   });
 
   it("renders every dock settings destination without placeholder claims", async () => {

@@ -13,11 +13,18 @@
     Sparkles
   } from "lucide-svelte";
   import Mascot from "./Mascot.svelte";
-  import { COMMANDS, EVENTS } from "$lib/contracts/ipc";
+  import { COMMANDS, EVENTS, type AccessibilityStatus } from "$lib/contracts/ipc";
   import { invokeCommand } from "$lib/contracts/bridge";
 
   let step = $state(0);
   let accessGranted = $state(false);
+  let accessibilityStatus = $state<AccessibilityStatus>({
+    app_trusted: false,
+    capture_service_trusted: false,
+    capture_service_operational: false,
+    ready: false,
+    next_request: "app"
+  });
   let inputMonitoringGranted = $state(false);
   let microphoneGranted = $state(false);
   let apiKey = $state("");
@@ -82,14 +89,34 @@
             ? "Not now"
             : "Continue"
   );
+  let accessibilityRequestLabel = $derived(
+    accessibilityStatus.ready
+      ? "Local capture is ready"
+      : accessibilityStatus.next_request === "app"
+        ? "Allow Accessibility for woof"
+        : accessibilityStatus.next_request === "capture-service"
+          ? "Reveal capture service to add manually"
+          : "Restart woof to apply Accessibility"
+  );
+
+  function applyAccessibilityStatus(status: AccessibilityStatus): void {
+    accessibilityStatus = status;
+    accessGranted = status.ready;
+  }
 
   async function refreshPermissions(): Promise<void> {
     const [accessibility, inputMonitoring, microphone] = await Promise.all([
-      invokeCommand<boolean>(COMMANDS.accessibilityTrusted).catch(() => false),
+      invokeCommand<AccessibilityStatus>(COMMANDS.accessibilityStatus).catch(() => ({
+        app_trusted: false,
+        capture_service_trusted: false,
+        capture_service_operational: false,
+        ready: false,
+        next_request: "app" as const
+      })),
       invokeCommand<boolean>(COMMANDS.inputMonitoringTrusted).catch(() => false),
       invokeCommand<string>(COMMANDS.microphoneStatus).catch(() => "not-determined")
     ]);
-    accessGranted = accessibility;
+    applyAccessibilityStatus(accessibility);
     inputMonitoringGranted = inputMonitoring;
     microphoneGranted = microphone === "authorized" || microphone === "granted";
   }
@@ -97,13 +124,17 @@
   async function requestAccess(): Promise<void> {
     error = "";
     try {
-      await invokeCommand(COMMANDS.requestAccessibility);
-      accessGranted = await invokeCommand<boolean>(COMMANDS.accessibilityTrusted);
-      if (!accessGranted) {
-        error = "Turn on Accessibility for woof and its local capture service, then return here.";
+      const status = await invokeCommand<AccessibilityStatus>(COMMANDS.requestAccessibility);
+      applyAccessibilityStatus(status);
+      if (!status.ready) {
+        error = status.next_request === "app"
+          ? "Enable woof in Accessibility, then return here."
+          : status.next_request === "capture-service"
+            ? "Finder selected woof_d. In Accessibility, click +, add that file, and enable it."
+            : "Both entries are enabled. Quit and reopen woof so macOS applies the change.";
       }
     } catch {
-      error = "woof couldn’t request Accessibility for both local components.";
+      error = "woof couldn’t check the next Accessibility step.";
     }
   }
 
@@ -220,7 +251,7 @@
         <div class="permission-stack">
           <button class:done={accessGranted} class="permission-button" onclick={requestAccess}>
             {#if accessGranted}<Check size={18} />{:else}<Accessibility size={18} />{/if}
-            {accessGranted ? "Local capture is ready" : "Allow Accessibility capture"}
+            {accessibilityRequestLabel}
           </button>
           <button class:done={inputMonitoringGranted} class="permission-button" onclick={requestInputMonitoring}>
             {#if inputMonitoringGranted}<Check size={18} />{:else}<Command size={18} />{/if}

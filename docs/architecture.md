@@ -4,11 +4,11 @@ woof is a native macOS application with three executable components and shared R
 
 ## Desktop application
 
-The Tauri process owns the menu-bar lifecycle, top-edge window, settings interface, Keychain access, and daemon supervision. It starts one daemon child, proves daemon ownership with a fresh challenge tied to the local bearer token, passes the persisted pause state before capture starts, and terminates the child during shutdown.
+The Tauri process owns the menu-bar lifecycle, top-edge window, settings interface, Keychain access, and daemon supervision. Its static `LSUIElement` metadata and runtime Accessory activation policy keep the agent out of the Dock. It starts one daemon child, proves daemon ownership with a fresh challenge tied to the local bearer token, passes the persisted pause state before capture starts, and terminates the child during shutdown.
 
 The Svelte interface communicates with trusted Tauri commands and the authenticated daemon API. Source-controlled window dimensions and activation behavior keep the compact and expanded states deterministic.
 
-Accessibility onboarding requires both native clients: the Tauri process checks its own TCC state for inline rewriting, while an authenticated daemon status check verifies the independently trusted, running `woof_d` capture process. Each process invokes the macOS prompt API for its own code identity, and onboarding rechecks both after the daemon resume response before persisting completion.
+Accessibility onboarding requires both native clients: the Tauri process checks its own TCC state for inline rewriting, while an authenticated daemon status check verifies the independently trusted, running `woof_d` capture process. macOS grants Accessibility per executable, but attributes a prompt from the bundled child daemon to the parent application instead of creating a distinct helper entry. The app therefore requests woof normally, then opens Accessibility and reveals the exact signed `woof_d` file for the user to add with `+`. Onboarding exposes each status separately and rechecks both after the daemon resume response before persisting completion.
 
 ## Daemon
 

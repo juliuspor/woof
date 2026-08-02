@@ -21,7 +21,7 @@ const defaults: Partial<Record<CommandName, unknown>> = {
   [COMMANDS.inputMonitoringTrusted]: false,
   [COMMANDS.microphoneStatus]: "not-determined",
   [COMMANDS.companionGetPosition]: "top",
-  [COMMANDS.companionGetHoverOpen]: false,
+  [COMMANDS.companionGetHoverOpen]: true,
   [COMMANDS.companionGetCollapsedAutoHide]: false,
   [COMMANDS.captureIsPaused]: true,
   [COMMANDS.getReduceVisualEffects]: false,
@@ -223,17 +223,85 @@ function dockPosition(value: unknown): value is DockPosition {
 export async function invokeMock(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
   if (command.startsWith("plugin:")) return 1;
   const name = command as CommandName;
+  if (name === COMMANDS.accessibilityStatus) {
+    const explicit = stored(name);
+    if (explicit !== undefined) return explicit;
+    const ready = stored(COMMANDS.accessibilityTrusted) === true;
+    return {
+      app_trusted: ready,
+      capture_service_trusted: ready,
+      capture_service_operational: ready,
+      ready,
+      next_request: ready ? null : "app"
+    };
+  }
+  if (name === COMMANDS.requestAccessibility) {
+    const explicit = stored(name);
+    return explicit ?? invokeMock(COMMANDS.accessibilityStatus);
+  }
   const saved = stored(name);
   if (saved !== undefined) return saved;
+
+  if (name === COMMANDS.companionPointerReady) {
+    const inside = window.localStorage.getItem("woof:test:pointer-inside") === "true";
+    window.dispatchEvent(new CustomEvent(EVENTS.companionPointer, { detail: inside }));
+    return undefined;
+  }
+  if (name === COMMANDS.companionSetState) {
+    if (args.state !== "collapsed" && args.state !== "expanded" && args.state !== "hidden") {
+      throw new Error("invalid companion state");
+    }
+    const requestId =
+      typeof args.requestId === "number" && Number.isSafeInteger(args.requestId)
+        ? args.requestId
+        : null;
+    const detail = requestId !== null
+      ? { state: args.state, requestId }
+      : args.state;
+    window.dispatchEvent(new CustomEvent(EVENTS.chatState, { detail }));
+    return undefined;
+  }
+  if (name === COMMANDS.companionOpenFocused) {
+    const requestId =
+      typeof args.requestId === "number" && Number.isSafeInteger(args.requestId)
+        ? args.requestId
+        : null;
+    const detail = requestId !== null
+      ? { state: "expanded", requestId }
+      : "expanded";
+    window.dispatchEvent(new CustomEvent(EVENTS.chatState, { detail }));
+    return undefined;
+  }
+  if (name === COMMANDS.companionRollup) {
+    const requestId =
+      typeof args.requestId === "number" && Number.isSafeInteger(args.requestId)
+        ? args.requestId
+        : null;
+    const detail = requestId !== null
+      ? { state: "collapsed", requestId }
+      : "collapsed";
+    window.dispatchEvent(new CustomEvent(EVENTS.chatState, { detail }));
+    return undefined;
+  }
 
   if (name === COMMANDS.companionSetHoverOpen) {
     if (typeof args.enabled !== "boolean") throw new Error("enabled is required");
     store(COMMANDS.companionGetHoverOpen, args.enabled);
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.preferencesChanged, {
+        detail: { companionHoverOpen: args.enabled }
+      })
+    );
     return args.enabled;
   }
   if (name === COMMANDS.companionSetCollapsedAutoHide) {
     if (typeof args.enabled !== "boolean") throw new Error("enabled is required");
     store(COMMANDS.companionGetCollapsedAutoHide, args.enabled);
+    window.dispatchEvent(
+      new CustomEvent(EVENTS.preferencesChanged, {
+        detail: { collapsedAutoHide: args.enabled }
+      })
+    );
     return undefined;
   }
   if (name === COMMANDS.companionSetPosition) {

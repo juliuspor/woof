@@ -29,12 +29,45 @@ describe("onboarding permissions", () => {
       screen.getByRole("button", { name: "Set up Input Monitoring (optional)" })
     ).toBeInTheDocument();
 
-    await fireEvent.click(screen.getByRole("button", { name: "Allow Accessibility capture" }));
+    await fireEvent.click(screen.getByRole("button", { name: "Allow Accessibility for woof" }));
     expect(invoke).toHaveBeenCalledWith(COMMANDS.requestAccessibility);
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Turn on Accessibility for woof and its local capture service, then return here."
+      "Enable woof in Accessibility, then return here."
     );
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+  });
+
+  it("reveals the capture service for manual Accessibility registration", async () => {
+    window.localStorage.setItem(
+      "woof:command:accessibility_status",
+      JSON.stringify({
+        app_trusted: true,
+        capture_service_trusted: false,
+        capture_service_operational: false,
+        ready: false,
+        next_request: "capture-service"
+      })
+    );
+    window.localStorage.setItem(
+      "woof:command:request_accessibility",
+      JSON.stringify({
+        app_trusted: true,
+        capture_service_trusted: false,
+        capture_service_operational: false,
+        ready: false,
+        next_request: "capture-service"
+      })
+    );
+    render(Onboarding);
+    await openLocalCaptureStep();
+
+    const request = await screen.findByRole("button", {
+      name: "Reveal capture service to add manually"
+    });
+    await fireEvent.click(request);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Finder selected woof_d. In Accessibility, click +, add that file, and enable it."
+    );
   });
 
   it("completes local capture setup without Input Monitoring, microphone, or an API key", async () => {
@@ -86,6 +119,15 @@ describe("onboarding permissions", () => {
     vi.spyOn(bridge, "invokeCommand").mockImplementation(async (command) => {
       if (command === COMMANDS.finishOnboarding) {
         throw new Error("Accessibility changed before local capture could start");
+      }
+      if (command === COMMANDS.accessibilityStatus) {
+        return {
+          app_trusted: true,
+          capture_service_trusted: true,
+          capture_service_operational: true,
+          ready: true,
+          next_request: null
+        };
       }
       if (command === COMMANDS.accessibilityTrusted) return true;
       if (command === COMMANDS.microphoneStatus) return "not-determined";

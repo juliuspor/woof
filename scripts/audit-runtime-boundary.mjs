@@ -540,10 +540,18 @@ function staticAudit() {
   ]);
   requireSource("apps/woof/src-tauri/src/lib.rs", [
     "handle.state::<DaemonSupervisor>().shutdown()",
+    "app.set_activation_policy(tauri::ActivationPolicy::Accessory)",
   ]);
   requireSource("apps/woof/src-tauri/Info.plist", [
+    "<key>LSUIElement</key>",
     "<key>LSMultipleInstancesProhibited</key>",
   ]);
+  assert(
+    /<key>LSUIElement<\/key>\s*<true\/>/.test(
+      source("apps/woof/src-tauri/Info.plist"),
+    ),
+    "Info.plist does not declare woof as a menu-bar agent",
+  );
   assert(
     /<key>LSMultipleInstancesProhibited<\/key>\s*<true\/>/.test(
       source("apps/woof/src-tauri/Info.plist"),

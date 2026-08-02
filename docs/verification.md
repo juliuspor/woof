@@ -108,7 +108,7 @@ The local self-issued signing scripts are development-only and are not part of t
 
 On a clean test account:
 
-1. Launch woof with Accessibility denied and verify that onboarding remains blocked. Request access from onboarding, grant both signed woof entries, and proceed only after the GUI is trusted and the daemon-owned capture check reports trusted and running. Revoke either grant before finishing; capture must remain paused and onboarding must return to Accessibility. This TCC interaction requires a real signed app. Automated tests alone can't prove it.
+1. Launch woof with Accessibility denied and verify that onboarding remains blocked. Request woof access first. For the capture-service step, verify that woof opens Accessibility and reveals the exact bundled `woof_d` executable without showing another misleading parent-app prompt; add the revealed file with `+`. Grant both stable signed entries and proceed only after the GUI is trusted and the daemon-owned capture check reports trusted and running. Revoke either grant before finishing; capture must remain paused and onboarding must return to Accessibility. This TCC interaction requires a real signed app. Automated tests alone can't prove it.
 2. Open, expand, collapse, and dismiss the compact top-edge window.
 3. Test capture status, pause, resume, persisted-paused startup, secure-input refusal, and excluded-application settings.
 4. Open recent activity, local semantic search, wiki, generated memory, and time views with stored data.

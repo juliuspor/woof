@@ -6,21 +6,121 @@ use std::{
     time::Duration,
 };
 
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicU8;
+
 use serde::{Deserialize, Serialize};
 use tauri::{
     LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize, Position, Size, WebviewWindow,
 };
 
+#[cfg(target_os = "macos")]
+use objc2::{
+    define_class,
+    ffi::{objc_getAssociatedObject, objc_setAssociatedObject, OBJC_ASSOCIATION_RETAIN_NONATOMIC},
+    msg_send,
+    rc::Retained,
+    runtime::{AnyObject, NSObjectProtocol},
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSEvent, NSTrackingArea, NSTrackingAreaOptions, NSWindow};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize};
+#[cfg(target_os = "macos")]
+use tauri::Emitter;
+
 pub const WINDOW_LABEL: &str = "companion-chat";
+pub const POINTER_EVENT: &str = "woof:companion-pointer";
 pub const COLLAPSED_WIDTH: f64 = 260.0;
 pub const COLLAPSED_HEIGHT: f64 = 32.0;
 pub const EXPANDED_WIDTH: f64 = 588.0;
 pub const EXPANDED_HEIGHT: f64 = 440.0;
 
-const DEFAULT_MORPH_DURATION_S: f64 = 0.18;
+pub const DEFAULT_MORPH_DURATION_S: f64 = 0.12;
 const MAX_ANIMATION_DURATION_S: f64 = 2.0;
 static ALPHA_GENERATION: AtomicU64 = AtomicU64::new(0);
 static DRAG_MODE: Mutex<Option<PanelMode>> = Mutex::new(None);
+
+#[cfg(target_os = "macos")]
+static HOVER_TRACKER_ASSOCIATION_KEY: u8 = 0;
+
+#[cfg(target_os = "macos")]
+struct HoverTrackingIvars {
+    window: WebviewWindow,
+    native_window: usize,
+    pointer_state: AtomicU8,
+}
+
+#[cfg(target_os = "macos")]
+define_class!(
+    #[unsafe(super = NSObject)]
+    #[name = "WoofCompanionHoverTrackingOwner"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = HoverTrackingIvars]
+    struct HoverTrackingOwner;
+
+    unsafe impl NSObjectProtocol for HoverTrackingOwner {}
+
+    impl HoverTrackingOwner {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            self.publish_pointer_truth();
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.publish_pointer_truth();
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, _event: &NSEvent) {
+            self.publish_pointer_truth();
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+impl HoverTrackingOwner {
+    fn new(window: WebviewWindow, native_window: usize, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(HoverTrackingIvars {
+            window,
+            native_window,
+            pointer_state: AtomicU8::new(0),
+        });
+        // SAFETY: NSObject's init signature is correct and the ivars were set.
+        unsafe { msg_send![super(this), init] }
+    }
+
+    fn publish_pointer_truth(&self) {
+        // SAFETY: Tauri supplied the NSWindow pointer retained by the
+        // WebviewWindow ivar, and AppKit invokes tracking callbacks on its main
+        // thread.
+        let Some(native) = (unsafe { (self.ivars().native_window as *mut NSWindow).as_ref() })
+        else {
+            return;
+        };
+        let inside = native_pointer_inside(native);
+        let next = if inside { 2 } else { 1 };
+        if self.ivars().pointer_state.swap(next, Ordering::AcqRel) == next {
+            return;
+        }
+        let _ = self.ivars().window.emit(POINTER_EVENT, inside);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn native_pointer_inside(native: &NSWindow) -> bool {
+    native.contentView().is_some_and(|content| {
+        let point = content.convertPoint_fromView(native.mouseLocationOutsideOfEventStream(), None);
+        let bounds = content.bounds();
+        native.isVisible()
+            && point.x >= bounds.origin.x
+            && point.y >= bounds.origin.y
+            && point.x < bounds.origin.x + bounds.size.width
+            && point.y < bounds.origin.y + bounds.size.height
+    })
+}
 
 /// Dock positions supported by the woof companion window and its Tauri API.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -284,6 +384,44 @@ pub fn configure_at(window: &WebviewWindow, dock: DockPosition) -> Result<Physic
     set_mode_at(window, PanelMode::Collapsed, dock, false)
 }
 
+/// Installs a native AppKit tracking area on the persistent companion panel.
+///
+/// WKWebView DOM enter/leave events are not reliable while this borderless,
+/// non-activating window sits above another application. AppKit tracking is
+/// active regardless of which application is frontmost and publishes the
+/// cursor truth back to the companion webview.
+pub fn install_hover_tracking(window: &WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        install_native_hover_tracking(window)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Ok(())
+    }
+}
+
+/// Forces one native pointer-truth event after the frontend listener is ready.
+///
+/// Returning a boolean from an async command would allow an older snapshot to
+/// arrive after a newer tracking event. Emitting from AppKit's main thread
+/// preserves the same ordering as the regular tracking callbacks.
+pub fn publish_pointer_snapshot(window: &WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        publish_native_pointer_snapshot(window)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        window
+            .emit(POINTER_EVENT, false)
+            .map_err(|_| "could not publish companion pointer state".to_string())
+    }
+}
+
 pub fn redock_current_mode_at(
     window: &WebviewWindow,
     dock: DockPosition,
@@ -380,6 +518,120 @@ fn mode_for_logical_size(width: f64, height: f64) -> PanelMode {
     } else {
         PanelMode::Collapsed
     }
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_hover_tracking(window: &WebviewWindow) -> Result<(), String> {
+    let raw_window = window
+        .ns_window()
+        .map_err(|_| "could not access the native companion window")? as usize;
+    let keepalive = window.clone();
+    let apply = move || -> Result<(), String> {
+        let window = keepalive;
+        // SAFETY: Tauri supplied this pointer for the retained WebviewWindow.
+        // The closure is dispatched to AppKit's main thread before it is run.
+        let Some(native) = (unsafe { (raw_window as *mut NSWindow).as_ref() }) else {
+            return Err("the native companion window is unavailable".into());
+        };
+        let Some(content) = native.contentView() else {
+            return Err("the native companion content view is unavailable".into());
+        };
+        let content_ptr = Retained::as_ptr(&content).cast::<AnyObject>();
+        let association_key =
+            std::ptr::addr_of!(HOVER_TRACKER_ASSOCIATION_KEY).cast::<std::ffi::c_void>();
+
+        // Reconfiguration can run more than once over the lifetime of the
+        // persistent panel. Keep exactly one native tracker attached.
+        // SAFETY: Both pointers are valid Objective-C runtime objects/keys for
+        // the lifetime of the application.
+        if !(unsafe { objc_getAssociatedObject(content_ptr, association_key) }).is_null() {
+            return Ok(());
+        }
+
+        let mtm = MainThreadMarker::new()
+            .ok_or_else(|| "companion hover tracking requires AppKit's main thread".to_string())?;
+        let owner = HoverTrackingOwner::new(window, raw_window, mtm);
+        let options = NSTrackingAreaOptions::MouseEnteredAndExited
+            | NSTrackingAreaOptions::MouseMoved
+            | NSTrackingAreaOptions::ActiveAlways
+            | NSTrackingAreaOptions::InVisibleRect
+            | NSTrackingAreaOptions::EnabledDuringMouseDrag;
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, 0.0));
+        // SAFETY: HoverTrackingOwner implements the mouse selectors required
+        // by these options and the visible-rect option keeps geometry current
+        // while the companion morphs between collapsed and expanded frames.
+        let area = unsafe {
+            NSTrackingArea::initWithRect_options_owner_userInfo(
+                NSTrackingArea::alloc(),
+                rect,
+                options,
+                Some(owner.as_ref()),
+                None,
+            )
+        };
+        content.addTrackingArea(&area);
+        native.setAcceptsMouseMovedEvents(true);
+
+        // NSTrackingArea does not own its event owner. Associate the owner with
+        // the tracked view so it lives exactly as long as that native view.
+        // SAFETY: OBJC_ASSOCIATION_RETAIN_NONATOMIC retains `owner`; all access
+        // and teardown occur on AppKit's main thread.
+        unsafe {
+            objc_setAssociatedObject(
+                content_ptr.cast_mut(),
+                association_key,
+                Retained::as_ptr(&owner).cast_mut().cast::<AnyObject>(),
+                OBJC_ASSOCIATION_RETAIN_NONATOMIC,
+            );
+        }
+        Ok(())
+    };
+
+    if MainThreadMarker::new().is_some() {
+        return apply();
+    }
+
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let _ = result_tx.send(apply());
+        })
+        .map_err(|_| "could not schedule companion hover tracking".to_string())?;
+    result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "companion hover tracking timed out".to_string())?
+}
+
+#[cfg(target_os = "macos")]
+fn publish_native_pointer_snapshot(window: &WebviewWindow) -> Result<(), String> {
+    let raw_window = window
+        .ns_window()
+        .map_err(|_| "could not access the native companion window")? as usize;
+    let keepalive = window.clone();
+    let publish = move || -> Result<(), String> {
+        // SAFETY: Tauri supplied this pointer for the retained WebviewWindow.
+        // The closure only dereferences it on AppKit's main thread.
+        let Some(native) = (unsafe { (raw_window as *mut NSWindow).as_ref() }) else {
+            return Err("the native companion window is unavailable".into());
+        };
+        keepalive
+            .emit(POINTER_EVENT, native_pointer_inside(native))
+            .map_err(|_| "could not publish companion pointer state".to_string())
+    };
+
+    if MainThreadMarker::new().is_some() {
+        return publish();
+    }
+
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    window
+        .run_on_main_thread(move || {
+            let _ = result_tx.send(publish());
+        })
+        .map_err(|_| "could not schedule companion pointer snapshot".to_string())?;
+    result_rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "companion pointer snapshot timed out".to_string())?
 }
 
 /// Chooses the same six-position edge vocabulary from a dragged window's

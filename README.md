@@ -53,6 +53,8 @@ Build the desktop application with staged sidecars:
 npm run build
 ```
 
+The first local desktop build creates an isolated, self-issued development signing identity and reuses it for later builds. This keeps macOS permission identities stable while developing. It is not a distributable release identity; `scripts/build-release.sh` uses the separate Developer ID and notarization path.
+
 Build only the web interface with:
 
 ```sh
@@ -72,7 +74,7 @@ Success ends with `woof source verification passed.` The suite covers Rust forma
 ## First run
 
 1. Launch `woof.app`.
-2. Grant Accessibility access to the signed desktop app and daemon when macOS prompts.
+2. Grant Accessibility to woof. When prompted for the capture service, use the revealed `woof_d` file with Accessibility’s `+` button; macOS attributes an automatic child-process prompt to the parent app instead of creating the required helper entry.
 3. Add an OpenAI API key in settings if remote memory generation, chat, rewriting, or transcription is needed.
 4. Review the capture, retention, application-exclusion, reminder, and notification settings.
 

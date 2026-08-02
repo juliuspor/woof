@@ -1,10 +1,17 @@
 <script lang="ts">
   import { Accessibility, ArrowUpRight, Check, Command, Mic, RotateCw, ShieldCheck } from "lucide-svelte";
   import Mascot from "./Mascot.svelte";
-  import { COMMANDS } from "$lib/contracts/ipc";
+  import { COMMANDS, type AccessibilityStatus } from "$lib/contracts/ipc";
   import { invokeCommand } from "$lib/contracts/bridge";
 
   let accessibility = $state(false);
+  let accessibilityStatus = $state<AccessibilityStatus>({
+    app_trusted: false,
+    capture_service_trusted: false,
+    capture_service_operational: false,
+    ready: false,
+    next_request: "app"
+  });
   let microphone = $state(false);
   let inputMonitoring = $state(false);
   let checking = $state(false);
@@ -12,18 +19,28 @@
   async function refresh(): Promise<void> {
     checking = true;
     const [ax, input, mic] = await Promise.all([
-      invokeCommand<boolean>(COMMANDS.accessibilityTrusted).catch(() => false),
+      invokeCommand<AccessibilityStatus>(COMMANDS.accessibilityStatus).catch(() => ({
+        app_trusted: false,
+        capture_service_trusted: false,
+        capture_service_operational: false,
+        ready: false,
+        next_request: "app" as const
+      })),
       invokeCommand<boolean>(COMMANDS.inputMonitoringTrusted).catch(() => false),
       invokeCommand<string>(COMMANDS.microphoneStatus).catch(() => "denied")
     ]);
-    accessibility = ax;
+    accessibilityStatus = ax;
+    accessibility = ax.ready;
     inputMonitoring = input;
     microphone = mic === "authorized" || mic === "granted";
     checking = false;
   }
 
   async function openAccessibility(): Promise<void> {
-    await invokeCommand(COMMANDS.requestAccessibility);
+    accessibilityStatus = await invokeCommand<AccessibilityStatus>(
+      COMMANDS.requestAccessibility
+    ).catch(() => accessibilityStatus);
+    accessibility = accessibilityStatus.ready;
     window.setTimeout(refresh, 800);
   }
 
@@ -68,7 +85,16 @@
     <div class="permissions">
       <button class:granted={accessibility} onclick={openAccessibility}>
         <span class="icon"><Accessibility size={18} /></span>
-        <span><b>Accessibility</b><small>Visible interface text</small></span>
+        <span>
+          <b>Accessibility</b>
+          <small>
+            {accessibilityStatus.next_request === "capture-service"
+              ? "Next: reveal woof_d and add it with +"
+              : accessibilityStatus.next_request === "app"
+                ? "Next: woof"
+                : "Visible interface text"}
+          </small>
+        </span>
         {#if accessibility}<Check size={17} />{:else}<ArrowUpRight size={16} />{/if}
       </button>
       <button class:granted={microphone} onclick={openMicrophone}>

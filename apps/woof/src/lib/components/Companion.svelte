@@ -29,6 +29,7 @@
     type NativeChatState,
     type OpenChatPayload,
     type PositionDragPayload,
+    type PreferencesChangedPayload,
     type TranscriptionItemPayload,
     type TranscriptionLevelPayload,
     type TranscriptionProcessingPayload,
@@ -55,6 +56,7 @@
   let transcriptItems = $state<Array<{ item_id: string; text: string }>>([]);
   let pendingAttachment = $state<string | null>(null);
   let pendingOpenSource = $state<string | null>(null);
+  let captureActionError = $state("");
   let activeResponseId = $state<string | null>(null);
   let receivedStreamingDelta = $state(false);
   let shell = $state<HTMLElement>();
@@ -84,10 +86,19 @@
   let dragScreen = { x: 0, y: 0 };
   let dragging = $state(false);
   let dockPosition = $state<DockPosition>("top");
+  let hoverOpenEnabled = $state(false);
+  let collapsedAutoHideEnabled = $state(false);
   let collapsedConcealed = $state(false);
+  type OpenOrigin = "hover" | "focused" | null;
+  let openOrigin = $state<OpenOrigin>(null);
+  let hoverArmed = $state(true);
   let suppressOpenUntil = 0;
-  let pointerInside = false;
+  let pointerInside = $state(false);
+  let nativePointerObserved = false;
   let pointerLeftAt = 0;
+  let transitionGeneration = 0;
+  let nativeTransitionQueue: Promise<void> = Promise.resolve();
+  const frontendNativeRequests = new Set<number>();
   let notificationStatus = $state<"denied" | "failed" | null>(null);
   let suppressNextUnverifiedActive = false;
   let chatThreadId = crypto.randomUUID();
@@ -148,6 +159,7 @@
 
   $effect(() => {
     activeMode = mode;
+    if (mode !== "expanded") openOrigin = null;
   });
 
   $effect(() => {
@@ -163,6 +175,11 @@
       return;
     }
 
+    if (MOTION.expandedBodyDelay === 0) {
+      contentVisible = true;
+      return;
+    }
+
     contentVisible = false;
     const timer = window.setTimeout(() => {
       contentVisible = true;
@@ -173,6 +190,34 @@
   $effect(() => {
     if (activeMode === "expanded" && !suggestionsLoaded) void refreshSuggestions();
   });
+
+  $effect(() => {
+    if (canAutoCollapse()) {
+      scheduleAutoCollapse();
+      return;
+    }
+    if (pointerInside || activeMode !== "expanded" || openOrigin !== "hover") {
+      clearCollapseTimer();
+    }
+  });
+
+  function enqueueNativeTransition(
+    requestId: number,
+    operation: (requestId: number) => Promise<unknown>
+  ): Promise<void> {
+    const run = nativeTransitionQueue.then(async () => {
+      if (requestId !== transitionGeneration) return;
+      frontendNativeRequests.add(requestId);
+      try {
+        await operation(requestId);
+      } catch (error) {
+        frontendNativeRequests.delete(requestId);
+        throw error;
+      }
+    });
+    nativeTransitionQueue = run.catch(() => undefined);
+    return run;
+  }
 
   function clearCollapseTimer(): void {
     if (closeTimer !== null) window.clearTimeout(closeTimer);
@@ -192,7 +237,14 @@
     return !target.closest("button, input, textarea, select, a, [contenteditable='true']");
   }
 
+  function promoteHoverOpen(): void {
+    if (activeMode !== "expanded" || openOrigin !== "hover") return;
+    openOrigin = "focused";
+    clearCollapseTimer();
+  }
+
   function handleDragPointerDown(event: PointerEvent): void {
+    promoteHoverOpen();
     if (!canStartDrag(event)) return;
     dragPointerId = event.pointerId;
     dragOrigin = { x: event.screenX, y: event.screenY };
@@ -248,9 +300,10 @@
     await invokeCommand(COMMANDS.companionDragEnd, { position: null }).catch(() => null);
   }
 
-  function openCollapsed(): void {
+  function openCollapsed(event: MouseEvent): void {
     if (performance.now() < suppressOpenUntil) return;
-    void openPassive();
+    if (event.detail === 0) void openFocused();
+    else void openPassive();
   }
 
   function openSettings(): void {
@@ -363,42 +416,72 @@
 
   function syncMode(next: CompanionMode): void {
     activeMode = next;
+    if (next !== "expanded") openOrigin = null;
     updateState({ companionMode: next });
   }
 
   async function openPassive(): Promise<void> {
     if (activeMode === "expanded") return;
+    const requestId = ++transitionGeneration;
+    const previousMode = activeMode;
+    const previousOrigin = openOrigin;
+    const previousConcealed = collapsedConcealed;
     clearCollapseTimer();
     collapsedConcealed = false;
     focusWithin = false;
+    openOrigin = "hover";
+    syncMode("expanded");
     try {
-      await invokeCommand(COMMANDS.companionSetState, { state: "expanded" });
+      await enqueueNativeTransition(requestId, (nativeRequestId) =>
+        invokeCommand(COMMANDS.companionSetState, {
+          state: "expanded",
+          requestId: nativeRequestId
+        })
+      );
     } catch {
+      if (requestId === transitionGeneration) {
+        syncMode(previousMode);
+        openOrigin = previousOrigin;
+        collapsedConcealed = previousConcealed;
+      }
       return;
     }
-    syncMode("expanded");
-    // A collapsed-tab click reveals the panel without making the composer key.
-    // If the pointer left while the native morph was running, preserve the
-    // passive interaction by starting the normal retraction delay now.
-    focusWithin = false;
-    if (!pointerInside) scheduleAutoCollapse();
   }
 
   async function openFocused(): Promise<void> {
+    const requestId = ++transitionGeneration;
+    const previousMode = activeMode;
+    const previousOrigin = openOrigin;
+    const previousFocus = focusWithin;
+    const previousConcealed = collapsedConcealed;
     clearCollapseTimer();
+    collapsedConcealed = false;
+    openOrigin = "focused";
+    syncMode("expanded");
     try {
-      await invokeCommand(COMMANDS.companionOpenFocused);
+      await enqueueNativeTransition(requestId, (nativeRequestId) =>
+        invokeCommand(COMMANDS.companionOpenFocused, {
+          requestId: nativeRequestId
+        })
+      );
     } catch {
+      if (requestId === transitionGeneration) {
+        syncMode(previousMode);
+        openOrigin = previousOrigin;
+        focusWithin = previousFocus;
+        collapsedConcealed = previousConcealed;
+      }
       return;
     }
-    syncMode("expanded");
+    if (requestId !== transitionGeneration) return;
     focusWithin = true;
 
     const deadline = performance.now() + 1500;
-    while (!composer && performance.now() < deadline) {
+    await tick();
+    while (!composer && requestId === transitionGeneration && performance.now() < deadline) {
       await new Promise((resolve) => window.setTimeout(resolve, 30));
     }
-    composer?.focus();
+    if (requestId === transitionGeneration) composer?.focus();
   }
 
   function transcriptionIsActive(): boolean {
@@ -415,28 +498,51 @@
     await invokeCommand(COMMANDS.transcriptionCancel).catch(() => undefined);
   }
 
-  async function collapse(): Promise<void> {
+  async function collapse(automatic = false): Promise<void> {
     await cancelTranscription();
+    if (activeMode !== "expanded") return;
+    if (automatic && !canAutoCollapse()) return;
+    const requestId = ++transitionGeneration;
+    const previousMode = activeMode;
+    const previousOrigin = openOrigin;
+    const previousContentVisible = contentVisible;
+    const previousFocus = focusWithin;
+    const previousHoverArmed = hoverArmed;
+    const previousConcealed = collapsedConcealed;
     clearCollapseTimer();
+    if (!automatic) hoverArmed = !pointerInside;
     contentVisible = false;
     focusWithin = false;
+    openOrigin = null;
+    syncMode("collapsed");
     try {
-      await invokeCommand(COMMANDS.companionRollup, {
-        durationMs: MOTION.panelExit
-      });
+      await enqueueNativeTransition(requestId, (nativeRequestId) =>
+        invokeCommand(COMMANDS.companionRollup, {
+          durationMs: MOTION.panelExit,
+          requestId: nativeRequestId
+        })
+      );
     } catch {
-      contentVisible = true;
+      if (requestId === transitionGeneration) {
+        syncMode(previousMode);
+        openOrigin = previousOrigin;
+        contentVisible = previousContentVisible;
+        focusWithin = previousFocus;
+        hoverArmed = previousHoverArmed;
+        collapsedConcealed = previousConcealed;
+      }
       return;
     }
+    if (requestId !== transitionGeneration) return;
     teardownSettings();
-    syncMode("collapsed");
-    collapsedConcealed = await invokeCommand<boolean>(
-      COMMANDS.companionGetCollapsedAutoHide
-    ).catch(() => false);
+    collapsedConcealed = collapsedAutoHideEnabled && !pointerInside;
   }
 
   function canAutoCollapse(): boolean {
     return (
+      activeMode === "expanded" &&
+      openOrigin === "hover" &&
+      !pointerInside &&
       !$appState.settingsOpen &&
       !focusWithin &&
       !sending &&
@@ -445,33 +551,49 @@
     );
   }
 
-  async function handlePointerEnter(): Promise<void> {
-    pointerInside = true;
-    collapsedConcealed = false;
-    if (closeTimer !== null) window.clearTimeout(closeTimer);
-    closeTimer = null;
-    if (activeMode !== "collapsed" || dragging) return;
-    const hoverOpen = await invokeCommand<boolean>(COMMANDS.companionGetHoverOpen).catch(
-      () => false
-    );
-    if (hoverOpen && pointerInside && activeMode === "collapsed") await openPassive();
+  function maybeOpenFromHover(): void {
+    if (
+      pointerInside &&
+      hoverArmed &&
+      hoverOpenEnabled &&
+      activeMode === "collapsed" &&
+      !dragging
+    ) {
+      void openPassive();
+    }
   }
 
-  function handlePointerLeave(): void {
+  function applyPointerEnter(): void {
+    const wasInside = pointerInside;
+    pointerInside = true;
+    collapsedConcealed = false;
+    clearCollapseTimer();
+    if (!wasInside) maybeOpenFromHover();
+  }
+
+  function applyPointerLeave(): void {
     pointerInside = false;
+    hoverArmed = true;
     pointerLeftAt = performance.now();
     if (activeMode === "collapsed") {
-      void invokeCommand<boolean>(COMMANDS.companionGetCollapsedAutoHide)
-        .then((autoHide) => {
-          if (autoHide && !pointerInside && activeMode === "collapsed" && !dragging) {
-            collapsedConcealed = true;
-          }
-        })
-        .catch(() => undefined);
-      return;
+      if (collapsedAutoHideEnabled && !dragging) collapsedConcealed = true;
+    } else if (canAutoCollapse()) {
+      scheduleAutoCollapse();
     }
-    if (activeMode !== "expanded" || !canAutoCollapse()) return;
-    scheduleAutoCollapse();
+  }
+
+  function handleDomPointerEnter(): void {
+    if (!nativePointerObserved) applyPointerEnter();
+  }
+
+  function handleDomPointerLeave(): void {
+    if (!nativePointerObserved) applyPointerLeave();
+  }
+
+  function handleNativePointer(inside: boolean): void {
+    nativePointerObserved = true;
+    if (inside) applyPointerEnter();
+    else applyPointerLeave();
   }
 
   function scheduleAutoCollapse(): void {
@@ -480,13 +602,19 @@
     const delay = Math.max(0, MOTION.hoverCloseDelay - elapsed);
     closeTimer = window.setTimeout(() => {
       closeTimer = null;
-      if (canAutoCollapse()) void collapse();
+      if (canAutoCollapse()) void collapse(true);
     }, delay);
+  }
+
+  function handleFocusIn(): void {
+    focusWithin = true;
+    clearCollapseTimer();
   }
 
   function handleFocusOut(): void {
     window.setTimeout(() => {
       focusWithin = !!shell?.contains(document.activeElement);
+      if (canAutoCollapse()) scheduleAutoCollapse();
     }, 0);
   }
 
@@ -512,13 +640,20 @@
   async function toggleCapture(): Promise<void> {
     const paused = $appState.capture === "paused";
     const previous = $appState.capture;
+    captureActionError = "";
     suppressNextUnverifiedActive = paused;
     updateState({ capture: paused ? "starting" : "paused" });
     try {
       await invokeCommand(paused ? COMMANDS.captureResume : COMMANDS.capturePause);
-    } catch {
+    } catch (error) {
       suppressNextUnverifiedActive = false;
       updateState({ capture: previous });
+      captureActionError =
+        typeof error === "string" && error.trim()
+          ? error
+          : error instanceof Error && error.message.trim()
+            ? error.message
+            : "Capture could not be resumed.";
     }
   }
 
@@ -650,7 +785,10 @@
   }
 
   function handleKeydown(event: KeyboardEvent): void {
-    if (event.key !== "Escape") return;
+    if (event.key !== "Escape") {
+      promoteHoverOpen();
+      return;
+    }
     event.preventDefault();
     if (transcriptionIsActive()) void cancelTranscription();
     if ($appState.settingsOpen || settingsMounted) closeSettings();
@@ -661,139 +799,255 @@
     if (initialSettings) updateState({ settingsOpen: true });
     if (activeMode === "expanded") void refreshSuggestions();
     const unlisteners: Array<() => void> = [];
+    let disposed = false;
+    function keepListener(
+      registration: Promise<() => void>,
+      afterReady?: () => void
+    ): void {
+      void registration
+        .then((unlisten) => {
+          if (disposed) {
+            unlisten();
+            return;
+          }
+          unlisteners.push(unlisten);
+          afterReady?.();
+        })
+        .catch(() => undefined);
+    }
+
+    keepListener(
+      listenEvent<PreferencesChangedPayload>(EVENTS.preferencesChanged, (payload) => {
+        if (typeof payload.companionHoverOpen === "boolean") {
+          hoverOpenEnabled = payload.companionHoverOpen;
+          if (hoverOpenEnabled) maybeOpenFromHover();
+        }
+        if (typeof payload.collapsedAutoHide === "boolean") {
+          collapsedAutoHideEnabled = payload.collapsedAutoHide;
+          collapsedConcealed =
+            payload.collapsedAutoHide && activeMode === "collapsed" && !pointerInside;
+        }
+      })
+    );
+    keepListener(
+      listenEvent<boolean>(EVENTS.companionPointer, (inside) => {
+        if (typeof inside === "boolean") handleNativePointer(inside);
+      }),
+      () => {
+        void invokeCommand(COMMANDS.companionPointerReady).catch(() => undefined);
+      }
+    );
     void invokeCommand<DockPosition>(COMMANDS.companionGetPosition)
       .then((position) => (dockPosition = position))
       .catch(() => undefined);
-    void invokeCommand<boolean>(COMMANDS.companionGetCollapsedAutoHide)
-      .then((autoHide) => (collapsedConcealed = autoHide && activeMode === "collapsed"))
+    void invokeCommand<boolean>(COMMANDS.companionGetHoverOpen)
+      .then((hoverOpen) => {
+        hoverOpenEnabled = hoverOpen;
+        if (hoverOpen) maybeOpenFromHover();
+      })
       .catch(() => undefined);
-    void listenEvent<DockPosition>(EVENTS.panelPosition, (position) => {
-      dockPosition = position;
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<PositionDragPayload>(EVENTS.positionDrag, (payload) => {
-      if (!payload.active) dragging = false;
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<TranscriptionLevelPayload>(EVENTS.transcriptionLevel, (payload) => {
-      const level = transcriptionLevelFromPayload(payload);
-      updateState({ transcriptionLevel: level, transcription: "listening" });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<TranscriptionStartPayload>(EVENTS.transcriptionStart, () => {
-      transcript = "";
-      transcriptItems = [];
-      updateState({ transcription: "listening" });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<TranscriptionItemPayload>(EVENTS.transcriptionPartial, (payload) => {
-      updateTranscriptItem(payload);
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<TranscriptionItemPayload>(
-      EVENTS.transcriptionItemCompleted,
-      (payload) => updateTranscriptItem(payload)
-    ).then((fn) => unlisteners.push(fn));
-    void listenEvent<string>(EVENTS.transcriptionCompleted, (text) => {
-      if (typeof text !== "string") return;
-      prompt = text;
-      transcript = text;
-      transcriptItems = [];
-      composer?.focus();
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<TranscriptionProcessingPayload | undefined>(
-      EVENTS.transcriptionProcessing,
-      () => {
-        updateState({ transcription: "processing", transcriptionLevel: 0 });
-      }
-    ).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.transcriptionDone, () => {
-      updateState({ transcription: "done", transcriptionLevel: 0 });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.transcriptionCancelled, () => {
-      updateState({ transcription: "cancelled", transcriptionLevel: 0 });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.transcriptionFailed, () => {
-      updateState({ transcription: "failed", transcriptionLevel: 0 });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.transcriptionOverflow, () => {
-      updateState({ transcription: "overflow", transcriptionLevel: 0 });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.transcriptionLimit, () => {
-      updateState({ transcription: "limit", transcriptionLevel: 0 });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<HealthChangedPayload>(EVENTS.healthChanged, (payload) => {
-      updateState({ health: payload.state });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<NativeChatState>(EVENTS.chatState, (payload) => {
-      const next = companionModeFromState(payload);
-      if (next !== "expanded") teardownSettings();
-      syncMode(next);
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.willRetract, () => {
-      contentVisible = false;
-      teardownSettings();
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<OpenChatPayload | undefined>(EVENTS.openChat, (payload) => {
-      void handleOpenChat(payload ?? {});
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<boolean>(EVENTS.capturePaused, (paused) => {
-      suppressNextUnverifiedActive = !paused;
-      updateState({ capture: paused ? "paused" : "starting" });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<{ state: CaptureState }>(EVENTS.captureChanged, ({ state }) => {
-      if (!["active", "paused", "starting", "permission-revoked", "error"].includes(state)) {
-        return;
-      }
-      if (state === "active" && suppressNextUnverifiedActive) {
+    void invokeCommand<boolean>(COMMANDS.companionGetCollapsedAutoHide)
+      .then((autoHide) => {
+        collapsedAutoHideEnabled = autoHide;
+        collapsedConcealed = autoHide && activeMode === "collapsed" && !pointerInside;
+      })
+      .catch(() => undefined);
+    keepListener(
+      listenEvent<DockPosition>(EVENTS.panelPosition, (position) => {
+        dockPosition = position;
+      })
+    );
+    keepListener(
+      listenEvent<PositionDragPayload>(EVENTS.positionDrag, (payload) => {
+        if (!payload.active) dragging = false;
+      })
+    );
+    keepListener(
+      listenEvent<TranscriptionLevelPayload>(EVENTS.transcriptionLevel, (payload) => {
+        const level = transcriptionLevelFromPayload(payload);
+        updateState({ transcriptionLevel: level, transcription: "listening" });
+      })
+    );
+    keepListener(
+      listenEvent<TranscriptionStartPayload>(EVENTS.transcriptionStart, () => {
+        transcript = "";
+        transcriptItems = [];
+        updateState({ transcription: "listening" });
+      })
+    );
+    keepListener(
+      listenEvent<TranscriptionItemPayload>(EVENTS.transcriptionPartial, (payload) => {
+        updateTranscriptItem(payload);
+      })
+    );
+    keepListener(
+      listenEvent<TranscriptionItemPayload>(
+        EVENTS.transcriptionItemCompleted,
+        (payload) => updateTranscriptItem(payload)
+      )
+    );
+    keepListener(
+      listenEvent<string>(EVENTS.transcriptionCompleted, (text) => {
+        if (typeof text !== "string") return;
+        prompt = text;
+        transcript = text;
+        transcriptItems = [];
+        composer?.focus();
+      })
+    );
+    keepListener(
+      listenEvent<TranscriptionProcessingPayload | undefined>(
+        EVENTS.transcriptionProcessing,
+        () => {
+          updateState({ transcription: "processing", transcriptionLevel: 0 });
+        }
+      )
+    );
+    keepListener(
+      listenEvent(EVENTS.transcriptionDone, () => {
+        updateState({ transcription: "done", transcriptionLevel: 0 });
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.transcriptionCancelled, () => {
+        updateState({ transcription: "cancelled", transcriptionLevel: 0 });
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.transcriptionFailed, () => {
+        updateState({ transcription: "failed", transcriptionLevel: 0 });
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.transcriptionOverflow, () => {
+        updateState({ transcription: "overflow", transcriptionLevel: 0 });
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.transcriptionLimit, () => {
+        updateState({ transcription: "limit", transcriptionLevel: 0 });
+      })
+    );
+    keepListener(
+      listenEvent<HealthChangedPayload>(EVENTS.healthChanged, (payload) => {
+        updateState({ health: payload.state });
+      })
+    );
+    keepListener(
+      listenEvent<NativeChatState>(EVENTS.chatState, (payload) => {
+        const rawRequestId = typeof payload === "object" ? payload.requestId : undefined;
+        const requestId =
+          typeof rawRequestId === "number" && Number.isSafeInteger(rawRequestId)
+            ? rawRequestId
+            : null;
+        if (requestId !== null && frontendNativeRequests.delete(requestId)) return;
+
+        transitionGeneration += 1;
+        clearCollapseTimer();
+        const next = companionModeFromState(payload);
+        if (next === "expanded") {
+          syncMode(next);
+          openOrigin = "focused";
+          collapsedConcealed = false;
+        } else {
+          teardownSettings();
+          hoverArmed = !pointerInside;
+          syncMode(next);
+          collapsedConcealed =
+            next === "collapsed" && collapsedAutoHideEnabled && !pointerInside;
+        }
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.willRetract, () => {
+        contentVisible = false;
+        teardownSettings();
+      })
+    );
+    keepListener(
+      listenEvent<OpenChatPayload | undefined>(EVENTS.openChat, (payload) => {
+        void handleOpenChat(payload ?? {});
+      })
+    );
+    keepListener(
+      listenEvent<boolean>(EVENTS.capturePaused, (paused) => {
+        suppressNextUnverifiedActive = !paused;
+        updateState({ capture: paused ? "paused" : "starting" });
+      })
+    );
+    keepListener(
+      listenEvent<{ state: CaptureState }>(EVENTS.captureChanged, ({ state }) => {
+        if (!["active", "paused", "starting", "permission-revoked", "error"].includes(state)) {
+          return;
+        }
+        if (state === "active" && suppressNextUnverifiedActive) {
+          suppressNextUnverifiedActive = false;
+          updateState({ capture: "starting" });
+          return;
+        }
         suppressNextUnverifiedActive = false;
-        updateState({ capture: "starting" });
-        return;
-      }
-      suppressNextUnverifiedActive = false;
-      updateState({ capture: state });
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.openSettings, () => {
-      void openFocused().then(openSettings);
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<string>(EVENTS.chatDelta, (delta) => {
-      if (!activeResponseId) return;
-      receivedStreamingDelta = true;
-      appendMessage(activeResponseId, delta);
-      void tick().then(() => messagesEnd?.scrollIntoView({ behavior: "smooth" }));
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent(EVENTS.chatComplete, () => {
-      if (activeResponseId) finishMessage(activeResponseId);
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<NudgePayload>(EVENTS.nudgeReady, (payload) => {
-      if (
-        !payload?.nudge_id ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
-          payload.nudge_id
-        ) ||
-        !payload.title ||
-        !payload.body
-      ) return;
-      const existing = nudgeQueue.findIndex(
-        (candidate) => candidate.nudge_id === payload.nudge_id
-      );
-      if (existing >= 0) {
-        nudgeQueue = nudgeQueue.map((candidate, index) =>
-          index === existing ? payload : candidate
+        updateState({ capture: state });
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.openSettings, () => {
+        void openFocused().then(openSettings);
+      })
+    );
+    keepListener(
+      listenEvent<string>(EVENTS.chatDelta, (delta) => {
+        if (!activeResponseId) return;
+        receivedStreamingDelta = true;
+        appendMessage(activeResponseId, delta);
+        void tick().then(() => messagesEnd?.scrollIntoView({ behavior: "smooth" }));
+      })
+    );
+    keepListener(
+      listenEvent(EVENTS.chatComplete, () => {
+        if (activeResponseId) finishMessage(activeResponseId);
+      })
+    );
+    keepListener(
+      listenEvent<NudgePayload>(EVENTS.nudgeReady, (payload) => {
+        if (
+          !payload?.nudge_id ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(
+            payload.nudge_id
+          ) ||
+          !payload.title ||
+          !payload.body
+        ) return;
+        const existing = nudgeQueue.findIndex(
+          (candidate) => candidate.nudge_id === payload.nudge_id
         );
-      } else if (nudgeQueue.length < 500) {
-        nudgeQueue = [...nudgeQueue, payload];
-      }
-      nudgeActionError = "";
-      notificationStatus = null;
-      utilityPanel = null;
-      void invokeCommand(COMMANDS.companionSetNudgeActive, { active: true }).catch(
-        () => undefined
-      );
-    }).then((fn) => unlisteners.push(fn));
-    void listenEvent<{ status?: "denied" | "failed" }>(
-      EVENTS.notificationStatus,
-      (payload) => {
-        notificationStatus = payload?.status ?? null;
-      }
-    ).then((fn) => unlisteners.push(fn));
+        if (existing >= 0) {
+          nudgeQueue = nudgeQueue.map((candidate, index) =>
+            index === existing ? payload : candidate
+          );
+        } else if (nudgeQueue.length < 500) {
+          nudgeQueue = [...nudgeQueue, payload];
+        }
+        nudgeActionError = "";
+        notificationStatus = null;
+        utilityPanel = null;
+        void invokeCommand(COMMANDS.companionSetNudgeActive, { active: true }).catch(
+          () => undefined
+        );
+      })
+    );
+    keepListener(
+      listenEvent<{ status?: "denied" | "failed" }>(
+        EVENTS.notificationStatus,
+        (payload) => {
+          notificationStatus = payload?.status ?? null;
+        }
+      )
+    );
 
     return () => {
+      disposed = true;
+      transitionGeneration += 1;
+      frontendNativeRequests.clear();
       clearCollapseTimer();
       clearSettingsCloseTimer();
       if (dragFrame !== null) window.cancelAnimationFrame(dragFrame);
@@ -832,13 +1086,14 @@
   class="dock-shell"
   data-state={activeMode}
   data-testid="companion-shell"
-  onpointerenter={() => void handlePointerEnter()}
-  onpointerleave={handlePointerLeave}
+  onmouseenter={handleDomPointerEnter}
+  onmouseleave={handleDomPointerLeave}
+  onmousemove={handleDomPointerEnter}
   onpointerdown={handleDragPointerDown}
   onpointermove={handleDragPointerMove}
   onpointerup={(event) => void finishDrag(event)}
   onpointercancel={(event) => void finishDrag(event)}
-  onfocusin={() => (focusWithin = true)}
+  onfocusin={handleFocusIn}
   onfocusout={handleFocusOut}
 >
   {#if isCollapsed}
@@ -859,7 +1114,12 @@
       <SettingsPanel dock onclose={closeSettings} />
     </div>
   {:else}
-    <section class:visible={contentVisible} class="chat fade-target" aria-label="woof chat">
+    <section
+      class:visible={contentVisible}
+      class="chat fade-target"
+      aria-label="woof chat"
+      style:transition-duration={`${MOTION.expandedContentFade}ms`}
+    >
       <header class="chat-header">
         <div class="header-left no-drag">
           <button class="brand" aria-label="woof home">
@@ -899,14 +1159,14 @@
           <button class="round-button" aria-label="New chat" onclick={newChat}>
             <Plus size={16} strokeWidth={1.8} />
           </button>
-          <button class="esc-button" aria-label="Collapse" onclick={collapse}>esc</button>
+          <button class="esc-button" aria-label="Collapse" onclick={() => void collapse()}>esc</button>
         </div>
       </header>
 
       {#if $appState.capture === "paused"}
         <div class="capture-banner">
           <Pause size={11} />
-          <span>Capture is paused</span>
+          <span class:attention-text={captureActionError}>{captureActionError || "Capture is paused"}</span>
           <button onclick={toggleCapture}><Play size={10} /> Resume</button>
         </div>
       {:else if $appState.capture === "permission-revoked"}
@@ -1285,7 +1545,8 @@
   .fade-target {
     opacity: 0;
     pointer-events: none;
-    transition: opacity 220ms ease;
+    transition-property: opacity;
+    transition-timing-function: ease;
   }
 
   .fade-target.visible {
@@ -1427,6 +1688,17 @@
     background: transparent;
     font-size: inherit;
     cursor: pointer;
+  }
+
+  .capture-banner span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .capture-banner .attention-text {
+    color: #ff9f91;
   }
 
   .capture-banner.attention {

@@ -30,7 +30,6 @@ const EVENT_KEY_DOWN: CGEventType = 10;
 const EVENT_TAP_DISABLED_BY_TIMEOUT: CGEventType = u32::MAX - 1;
 const EVENT_TAP_DISABLED_BY_USER_INPUT: CGEventType = u32::MAX;
 const EVENT_FIELD_KEYCODE: i32 = 9;
-const EVENT_SOURCE_COMBINED_SESSION: i32 = 0;
 const EVENT_TAP_SESSION: u32 = 1;
 const EVENT_TAP_HEAD_INSERT: u32 = 0;
 const EVENT_TAP_LISTEN_ONLY: u32 = 1;
@@ -76,7 +75,6 @@ unsafe extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventGetIntegerValueField(event: CGEventRef, field: i32) -> i64;
     fn CGEventGetFlags(event: CGEventRef) -> CGEventFlags;
-    fn CGEventSourceKeyState(state_id: i32, key: u16) -> bool;
 }
 
 /// Returns whether macOS currently allows woof to observe global modifier
@@ -378,7 +376,8 @@ unsafe extern "C" fn record_modifier_callback(
         let Some(key) = modifier_key_from_code(key_code) else {
             return;
         };
-        let pressed = modifier_key_is_pressed(event, key_code, key);
+        let flags = CGEventGetFlags(event);
+        let pressed = modifier_key_is_pressed(flags, key);
         if pressed {
             if IsSecureEventInputEnabled() {
                 if let Ok(mut result) = context.result.lock() {
@@ -674,17 +673,10 @@ unsafe extern "C" fn event_tap_callback(
         }
 
         let key_code = CGEventGetIntegerValueField(event, EVENT_FIELD_KEYCODE);
-        let Some(key) = modifier_key_from_code(key_code) else {
-            return;
-        };
-        let pressed = modifier_key_is_pressed(event, key_code, key);
         let flags = CGEventGetFlags(event);
-        let other_modifiers = flags & (MODIFIER_FLAGS & !modifier_flag(key)) != 0;
-        let input = ModifierInput {
-            key,
-            pressed,
-            other_modifiers,
-            at: context.started_at.elapsed(),
+        let Some(input) = modifier_input_from_event(key_code, flags, context.started_at.elapsed())
+        else {
+            return;
         };
         if IsSecureEventInputEnabled() {
             context.secure_detected.store(true, Ordering::SeqCst);
@@ -710,19 +702,25 @@ fn modifier_key_from_code(key_code: i64) -> Option<ModifierKey> {
     }
 }
 
-fn modifier_key_is_pressed(event: CGEventRef, key_code: i64, key: ModifierKey) -> bool {
-    if key == ModifierKey::Fn {
-        // Globe/Fn is represented by the function modifier flag on Apple
-        // keyboards and is not consistently reflected by key-state queries.
-        unsafe { CGEventGetFlags(event) & FUNCTION_FLAG != 0 }
-    } else {
-        unsafe {
-            CGEventSourceKeyState(
-                EVENT_SOURCE_COMBINED_SESSION,
-                u16::try_from(key_code).unwrap_or_default(),
-            )
-        }
-    }
+fn modifier_input_from_event(
+    key_code: i64,
+    flags: CGEventFlags,
+    at: Duration,
+) -> Option<ModifierInput> {
+    let key = modifier_key_from_code(key_code)?;
+    Some(ModifierInput {
+        key,
+        pressed: modifier_key_is_pressed(flags, key),
+        other_modifiers: flags & (MODIFIER_FLAGS & !modifier_flag(key)) != 0,
+        at,
+    })
+}
+
+const fn modifier_key_is_pressed(flags: CGEventFlags, key: ModifierKey) -> bool {
+    // kCGEventFlagsChanged carries the modifier state recorded for this event.
+    // Deriving the transition from that state keeps the key code and flags in
+    // one event stream instead of sampling session-wide state separately.
+    flags & modifier_flag(key) != 0
 }
 
 const fn modifier_flag(key: ModifierKey) -> CGEventFlags {
@@ -822,6 +820,54 @@ mod tests {
         for (code, key) in expected {
             assert_eq!(modifier_key_from_code(code), Some(key));
         }
+    }
+
+    #[test]
+    fn event_flags_drive_right_option_press_and_release_transitions() {
+        let press =
+            modifier_input_from_event(KEY_RIGHT_OPTION, OPTION_FLAG, Duration::from_millis(0))
+                .unwrap();
+        let release =
+            modifier_input_from_event(KEY_RIGHT_OPTION, 0, Duration::from_millis(50)).unwrap();
+        assert_eq!(press.key, ModifierKey::RightOption);
+        assert!(press.pressed);
+        assert!(!press.other_modifiers);
+        assert!(!release.pressed);
+        assert!(!release.other_modifiers);
+
+        let modified_press = modifier_input_from_event(
+            KEY_RIGHT_OPTION,
+            OPTION_FLAG | SHIFT_FLAG,
+            Duration::from_millis(100),
+        )
+        .unwrap();
+        let modified_release =
+            modifier_input_from_event(KEY_RIGHT_OPTION, SHIFT_FLAG, Duration::from_millis(150))
+                .unwrap();
+        assert!(modified_press.pressed);
+        assert!(modified_press.other_modifiers);
+        assert!(!modified_release.pressed);
+        assert!(modified_release.other_modifiers);
+    }
+
+    #[test]
+    fn event_flag_transitions_invoke_the_right_option_double_tap() {
+        let mut machine = ModifierStateMachine::default();
+        let transitions = [(OPTION_FLAG, 0), (0, 50), (OPTION_FLAG, 120), (0, 170)];
+        let events = transitions
+            .into_iter()
+            .flat_map(|(flags, milliseconds)| {
+                machine.handle(
+                    modifier_input_from_event(
+                        KEY_RIGHT_OPTION,
+                        flags,
+                        Duration::from_millis(milliseconds),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(events, vec![ModifierEvent::InlineInvoked]);
     }
 
     #[test]

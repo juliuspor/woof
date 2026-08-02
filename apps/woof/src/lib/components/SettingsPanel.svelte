@@ -37,6 +37,7 @@
   import {
     CAPTURE_BLACKLIST_KINDS,
     COMMANDS,
+    type AccessibilityStatus,
     type CaptureBlacklistEntry,
     type CaptureBlacklistKind,
     type CaptureBlacklistResponse,
@@ -125,6 +126,7 @@
   let loginItem = $state(false);
   let capturePaused = $state(false);
   let captureStatus = $state<CaptureStatus | null>(null);
+  let captureError = $state("");
   let keyConfigured = $state(false);
   let apiKey = $state("");
   let saved = $state(false);
@@ -138,6 +140,13 @@
   let draftKind = $state<CaptureBlacklistKind>("app_name");
   let draftPattern = $state("");
   let accessibilityGranted = $state(false);
+  let accessibilityStatus = $state<AccessibilityStatus>({
+    app_trusted: false,
+    capture_service_trusted: false,
+    capture_service_operational: false,
+    ready: false,
+    next_request: "app"
+  });
   let inputMonitoringGranted = $state(false);
   let microphonePermission = $state("not-determined");
   let contactName = $state("");
@@ -699,15 +708,44 @@
     return "Not requested";
   }
 
+  function accessibilityDetail(status: AccessibilityStatus): string {
+    const app = status.app_trusted ? "woof granted" : "woof not granted";
+    const service = status.capture_service_trusted
+      ? "capture service granted"
+      : status.next_request === "capture-service"
+        ? "click to reveal woof_d, then add it with +"
+        : "capture service not granted";
+    return `${app} · ${service}`;
+  }
+
+  function accessibilityLabel(status: AccessibilityStatus): string {
+    if (status.ready) return "Granted";
+    if (
+      status.app_trusted &&
+      status.capture_service_trusted &&
+      !status.capture_service_operational
+    ) {
+      return "Restart needed";
+    }
+    return "Not granted";
+  }
+
   async function refreshPermissions(epoch: number): Promise<void> {
     const request = ++permissionRefreshRequest;
     const [accessibility, inputMonitoring, microphone] = await Promise.all([
-      invokeCommand<boolean>(COMMANDS.accessibilityTrusted).catch(() => false),
+      invokeCommand<AccessibilityStatus>(COMMANDS.accessibilityStatus).catch(() => ({
+        app_trusted: false,
+        capture_service_trusted: false,
+        capture_service_operational: false,
+        ready: false,
+        next_request: "app" as const
+      })),
       invokeCommand<boolean>(COMMANDS.inputMonitoringTrusted).catch(() => false),
       invokeCommand<string>(COMMANDS.microphoneStatus).catch(() => "not-determined")
     ]);
     if (epoch !== permissionPollEpoch || request !== permissionRefreshRequest) return;
-    accessibilityGranted = accessibility;
+    accessibilityStatus = accessibility;
+    accessibilityGranted = accessibility.ready;
     inputMonitoringGranted = inputMonitoring;
     microphonePermission = microphone ?? "not-determined";
   }
@@ -725,7 +763,13 @@
 
   async function openAccessibilityPermission(): Promise<void> {
     const epoch = permissionPollEpoch;
-    await invokeCommand(COMMANDS.openAccessibilitySettings).catch(() => undefined);
+    const status = await invokeCommand<AccessibilityStatus>(COMMANDS.requestAccessibility).catch(
+      () => null
+    );
+    if (status) {
+      accessibilityStatus = status;
+      accessibilityGranted = status.ready;
+    }
     schedulePermissionRefresh(epoch);
   }
 
@@ -840,8 +884,11 @@
 
   async function toggleCapture(): Promise<void> {
     const shouldResume = capturePaused || captureStatus?.capturing !== true;
+    captureError = "";
     try {
       await invokeCommand(shouldResume ? COMMANDS.captureResume : COMMANDS.capturePause);
+    } catch (error) {
+      captureError = readableError(error, "Woof couldn’t change local capture state.");
     } finally {
       await refreshCaptureStatus();
     }
@@ -1058,6 +1105,7 @@
         <button class:paused={capturePaused} class="capture" onclick={toggleCapture}>
           {#if capturePaused}<Play size={15} /> Resume capture{:else if captureStatus?.capturing === true}<Pause size={15} /> Pause capture{:else}<Play size={15} /> Retry capture{/if}
         </button>
+        {#if captureError}<p class="nav-error" role="alert">{captureError}</p>{/if}
       </nav>
     {/if}
 
@@ -1087,6 +1135,7 @@
           </div>
           <button class:destructive={captureStatus?.capturing === true} onclick={() => void toggleCapture()}>{captureActionLabel()}</button>
         </section>
+        {#if captureError}<p class="inline-error" role="alert">{captureError}</p>{/if}
         <section class="dock-card memory-list">
           <div class="dock-card-heading compact-heading">
             <span><b>WORKING MEMORY</b><p>Most relevant recent context from the local daemon.</p></span>
@@ -1282,9 +1331,10 @@
                   <span>
                     <b>Accessibility</b>
                     <small>Required. Lets woof read on-screen text to build your memory.</small>
+                    <small>{accessibilityDetail(accessibilityStatus)}</small>
                   </span>
                   <span class:granted={accessibilityGranted} class="permission-state">
-                    <i></i>{accessibilityGranted ? "Granted" : "Not granted"}
+                    <i></i>{accessibilityLabel(accessibilityStatus)}
                   </span>
                 </button>
                 <button class="dock-permission-row" onclick={openMicrophonePermission}>
@@ -1756,6 +1806,13 @@
 
   nav .capture.paused {
     color: var(--sage);
+  }
+
+  .nav-error {
+    margin: 2px 8px 0;
+    color: var(--rose);
+    font-size: 8px;
+    line-height: 1.35;
   }
 
   .pane {

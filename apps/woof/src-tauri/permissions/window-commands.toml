@@ -9,6 +9,7 @@ commands.allow = [
 identifier = "settings-commands"
 description = "Commands used by the settings interface embedded in the companion and memory hub."
 commands.allow = [
+  "accessibility_status",
   "accessibility_trusted",
   "capture_is_paused",
   "capture_pause",
@@ -49,6 +50,7 @@ commands.allow = [
   "open_onboarding_window_cmd",
   "record_modifier_key",
   "record_secondary_shortcut",
+  "request_accessibility",
   "request_input_monitoring",
   "save_contact_info",
   "scheduled_reminder_create",
@@ -84,6 +86,7 @@ commands.allow = [
   "companion_chat_get_hover_open",
   "companion_chat_get_position",
   "companion_chat_open_focused",
+  "companion_chat_pointer_ready",
   "companion_chat_rollup",
   "companion_chat_set_notification_active",
   "companion_chat_set_nudge_card_active",
@@ -123,6 +126,7 @@ commands.allow = [
 identifier = "onboarding-commands"
 description = "Consent, permission, and credential commands used during onboarding."
 commands.allow = [
+  "accessibility_status",
   "accessibility_trusted",
   "finish_onboarding",
   "input_monitoring_trusted",
@@ -138,6 +142,7 @@ commands.allow = [
 identifier = "permission-commands"
 description = "Permission status and request commands used by the permission window."
 commands.allow = [
+  "accessibility_status",
   "accessibility_trusted",
   "input_monitoring_trusted",
   "microphone_status",

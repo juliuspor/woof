@@ -40,6 +40,7 @@ describe("woof desktop contract", () => {
     expect(companionModeFromState("hidden")).toBe("hidden");
     expect(companionModeFromState("collapsed")).toBe("collapsed");
     expect(companionModeFromState("expanded")).toBe("expanded");
+    expect(companionModeFromState({ state: "expanded", requestId: 7 })).toBe("expanded");
     expect(transcriptionLevelFromPayload({ level: 1.7 })).toBe(1);
     expect(transcriptionLevelFromPayload({ level: -0.4 })).toBe(0);
     expect(transcriptionItemFromPayload({ item_id: "item-1", text: "hello" })).toEqual({
@@ -78,12 +79,14 @@ describe("woof desktop contract", () => {
       memoryIdentitySave: COMMANDS.memoryIdentitySave,
       getHoverOpen: COMMANDS.companionGetHoverOpen,
       setHoverOpen: COMMANDS.companionSetHoverOpen,
+      pointerReady: COMMANDS.companionPointerReady,
       setCollapsedAutoHide: COMMANDS.companionSetCollapsedAutoHide
     };
     expect(commands).toEqual({
       memoryIdentitySave: "memory_identity_save",
       getHoverOpen: "companion_chat_get_hover_open",
       setHoverOpen: "companion_chat_set_hover_open",
+      pointerReady: "companion_chat_pointer_ready",
       setCollapsedAutoHide: "companion_chat_set_collapsed_auto_hide"
     });
 
@@ -464,16 +467,21 @@ describe("woof desktop contract", () => {
       resolve(process.cwd(), "src-tauri/src/commands.rs"),
       "utf8"
     );
-    const statusStart = nativeSource.indexOf("pub async fn accessibility_trusted(");
-    const requestStart = nativeSource.indexOf("pub async fn request_accessibility(", statusStart);
+    const statusStart = nativeSource.indexOf("pub async fn accessibility_status(");
+    const trustedStart = nativeSource.indexOf("pub async fn accessibility_trusted(", statusStart);
+    const requestStart = nativeSource.indexOf("pub async fn request_accessibility(", trustedStart);
     const settingsStart = nativeSource.indexOf("pub fn open_accessibility_settings(", requestStart);
-    const status = nativeSource.slice(statusStart, requestStart);
+    const status = nativeSource.slice(statusStart, trustedStart);
+    const trusted = nativeSource.slice(trustedStart, requestStart);
     const request = nativeSource.slice(requestStart, settingsStart);
     expect(status).toContain("is_accessibility_trusted()");
     expect(status).toContain('daemon_request(Method::GET, "/capture/accessibility", None)');
-    expect(status).toContain("accessibility_clients_ready(local_trusted, &status)");
+    expect(status).toContain("accessibility_status_from(local_trusted, &daemon_status)");
+    expect(trusted).toContain("accessibility_status(app)");
+    expect(trusted).toContain("status.ready");
     expect(request).toContain("request_local_accessibility()");
-    expect(request).toContain(
+    expect(request).toContain("reveal_capture_service_for_accessibility()?");
+    expect(request).not.toContain(
       'daemon_request(Method::POST, "/capture/accessibility/request", None)'
     );
 
@@ -637,9 +645,36 @@ describe("woof desktop contract", () => {
       label: "memory-hub", width: 1060, height: 720
     });
     expect(SCREENSHOT_VIEWPORTS.collapsed).toEqual({ width: 260, height: 32 });
-    expect(MOTION).toMatchObject({ companionMorph: 180, collapsedContentFade: 180 });
+    expect(MOTION).toMatchObject({
+      hoverCloseDelay: 120,
+      companionMorph: 120,
+      expandedBodyDelay: 0,
+      expandedContentFade: 100,
+      collapsedContentFade: 100,
+      panelExit: 120
+    });
     expect(CURVES.standard).toContain("cubic-bezier");
     expect(GLASS.blur).toBe(28);
+  });
+
+  it("tracks companion hover natively even while another app is active", () => {
+    const panelSource = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/companion_panel.rs"),
+      "utf8"
+    );
+    const appSource = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/lib.rs"),
+      "utf8"
+    );
+
+    expect(EVENTS.companionPointer).toBe("woof:companion-pointer");
+    expect(panelSource).toContain("NSTrackingAreaOptions::MouseEnteredAndExited");
+    expect(panelSource).toContain("NSTrackingAreaOptions::ActiveAlways");
+    expect(panelSource).toContain("NSTrackingAreaOptions::InVisibleRect");
+    expect(panelSource).toContain("mouseLocationOutsideOfEventStream");
+    expect(panelSource).toContain("window.emit(POINTER_EVENT, inside)");
+    expect(panelSource).toContain("publish_pointer_snapshot");
+    expect(appSource).toContain("companion_panel::install_hover_tracking(&companion)");
   });
 
   it("pins the native identity, sidecars, and privacy-sensitive windows", () => {
@@ -673,6 +708,10 @@ describe("woof desktop contract", () => {
     expect(infoPlist).toMatch(
       /<key>LSMultipleInstancesProhibited<\/key>\s*<true\/>/
     );
+    expect(infoPlist).toMatch(/<key>LSUIElement<\/key>\s*<true\/>/);
+    expect(
+      readFileSync(resolve(process.cwd(), "src-tauri/src/lib.rs"), "utf8")
+    ).toContain("app.set_activation_policy(tauri::ActivationPolicy::Accessory)");
     expect(
       config.app.windows.find((window: { label: string }) => window.label === "companion-chat")
         ?.url
@@ -692,6 +731,27 @@ describe("woof desktop contract", () => {
       "edit-mode": [440, 248]
     });
     expect(JSON.stringify(config)).not.toMatch(/updater|analytics|billing|auth/i);
+  });
+
+  it("keeps the borderless memory hub closable from the macOS window menu", () => {
+    const source = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/lib.rs"),
+      "utf8"
+    );
+    const configureStart = source.indexOf("fn configure_windows(");
+    const permissionSyncStart = source.indexOf(
+      "fn publish_permission_state(",
+      configureStart
+    );
+    const configureWindows = source.slice(configureStart, permissionSyncStart);
+
+    expect(configureWindows).toContain(
+      'app.get_webview_window("memory-hub")'
+    );
+    expect(configureWindows).toContain("memory_hub.set_closable(true)");
+    expect(source).toContain("WindowEvent::CloseRequested");
+    expect(source).toContain("api.prevent_close()");
+    expect(source).toContain("window.hide()");
   });
 
   it("keeps production signing separate from local development signing", () => {
@@ -753,6 +813,12 @@ describe("woof desktop contract", () => {
     );
     expect(desktopPackage.scripts["tauri:build"]).toContain(
       "../../scripts/stage-sidecars.sh debug"
+    );
+    expect(desktopPackage.scripts["tauri:build"]).toContain(
+      "../../scripts/create-local-signing-certificate.sh"
+    );
+    expect(desktopPackage.scripts["tauri:build"]).toContain(
+      '"signingIdentity":"woof local development signing"'
     );
     expect(desktopPackage.scripts["tauri:build:pre-staged"]).not.toContain(
       "stage-sidecars.sh"

@@ -561,7 +561,7 @@ pub(crate) async fn open_nudge(app: &tauri::AppHandle, nudge_id: &str) -> Result
             return false;
         };
         if url.host_str() != Some("memory-hub")
-            && crate::commands::companion_chat_open_focused(app.clone()).is_err()
+            && crate::commands::open_companion_focused(app).is_err()
         {
             return false;
         }
@@ -578,7 +578,7 @@ pub(crate) async fn open_nudge(app: &tauri::AppHandle, nudge_id: &str) -> Result
         return Ok(());
     }
 
-    crate::commands::companion_chat_open_focused(app.clone())?;
+    crate::commands::open_companion_focused(app)?;
     if !emit_nudge_to_companion(app, &nudge) {
         return Err("could not restore the nudge in woof".into());
     }

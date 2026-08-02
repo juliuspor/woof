@@ -318,7 +318,25 @@ fn hide(app: &AppHandle, label: &str) {
     }
 }
 
-fn set_companion_mode(app: &AppHandle, state: &str, animated: bool) -> Result<(), String> {
+fn emit_companion_state(
+    companion: &WebviewWindow,
+    state: &str,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    let payload = request_id
+        .map(|request_id| json!({"state": state, "requestId": request_id}))
+        .unwrap_or_else(|| json!(state));
+    companion
+        .emit("woof:chat-state", payload)
+        .map_err(|_| "could not update the companion".to_string())
+}
+
+fn set_companion_mode_with_request(
+    app: &AppHandle,
+    state: &str,
+    animated: bool,
+    request_id: Option<u64>,
+) -> Result<(), String> {
     let raw_state = native_chat_state(state)?;
     let mode = PanelMode::from_state(raw_state)?;
     let companion = webview(app, COMPANION_WINDOW_LABEL)?;
@@ -327,11 +345,17 @@ fn set_companion_mode(app: &AppHandle, state: &str, animated: bool) -> Result<()
     companion_panel::set_alpha(
         &companion,
         if raw_state == "hidden" { 0.0 } else { 1.0 },
-        if animated { 0.18 } else { 0.0 },
+        if animated {
+            companion_panel::DEFAULT_MORPH_DURATION_S
+        } else {
+            0.0
+        },
     )?;
-    companion
-        .emit("woof:chat-state", raw_state)
-        .map_err(|_| "could not update the companion".to_string())
+    emit_companion_state(&companion, raw_state, request_id)
+}
+
+fn set_companion_mode(app: &AppHandle, state: &str, animated: bool) -> Result<(), String> {
+    set_companion_mode_with_request(app, state, animated, None)
 }
 
 fn native_chat_state(state: &str) -> Result<&'static str, String> {
@@ -407,7 +431,14 @@ pub(crate) fn show_companion_collapsed(app: &AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn open_companion_focused(app: &AppHandle) -> Result<(), String> {
-    set_companion_mode(app, "expanded", true)?;
+    open_companion_focused_with_request(app, None)
+}
+
+fn open_companion_focused_with_request(
+    app: &AppHandle,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    set_companion_mode_with_request(app, "expanded", true, request_id)?;
     show_focused(app, COMPANION_WINDOW_LABEL)
 }
 
@@ -438,12 +469,7 @@ pub(crate) async fn daemon_request(
         .send()
         .await
         .map_err(|_| "woof’s local service is unavailable")?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "woof’s local service returned {}",
-            response.status().as_u16()
-        ));
-    }
+    let response_status = response.status();
     if response
         .content_length()
         .is_some_and(|length| length > MAX_DAEMON_RESPONSE_BYTES as u64)
@@ -469,6 +495,19 @@ pub(crate) async fn daemon_request(
             return Err("woof’s local service returned an oversized response".into());
         }
         bytes.extend_from_slice(&chunk);
+    }
+    if !response_status.is_success() {
+        let message = serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|body| body.get("error").and_then(Value::as_str).map(str::to_owned))
+            .filter(|message| {
+                !message.is_empty()
+                    && message.len() <= 256
+                    && !message.chars().any(char::is_control)
+            });
+        return Err(message.unwrap_or_else(|| {
+            format!("woof’s local service returned {}", response_status.as_u16())
+        }));
     }
     if bytes.is_empty() {
         return Ok(json!({"ok": true}));
@@ -902,26 +941,73 @@ pub fn load_contact_info(state: State<'_, UiState>) -> Result<ContactInfo, Strin
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct AccessibilityStatus {
+    app_trusted: bool,
+    capture_service_trusted: bool,
+    capture_service_operational: bool,
+    ready: bool,
+    next_request: Option<&'static str>,
+}
+
+fn accessibility_status_from(local_trusted: bool, daemon_status: &Value) -> AccessibilityStatus {
+    let capture_service_trusted =
+        daemon_status.get("trusted").and_then(Value::as_bool) == Some(true);
+    let capture_service_operational =
+        daemon_status.get("operational").and_then(Value::as_bool) == Some(true);
+    let ready = local_trusted && capture_service_trusted && capture_service_operational;
+    let next_request = if !local_trusted {
+        Some("app")
+    } else if !capture_service_trusted {
+        Some("capture-service")
+    } else {
+        None
+    };
+    AccessibilityStatus {
+        app_trusted: local_trusted,
+        capture_service_trusted,
+        capture_service_operational,
+        ready,
+        next_request,
+    }
+}
+
 #[tauri::command]
-pub async fn accessibility_trusted(app: AppHandle) -> bool {
+pub async fn accessibility_status(app: AppHandle) -> Result<AccessibilityStatus, String> {
     let local_trusted = is_accessibility_trusted();
     if local_trusted {
         let _ = crate::inline::ensure_modifier_monitor(&app);
     }
-    daemon_request(Method::GET, "/capture/accessibility", None)
-        .await
-        .is_ok_and(|status| accessibility_clients_ready(local_trusted, &status))
+    let daemon_status = daemon_request(Method::GET, "/capture/accessibility", None).await?;
+    Ok(accessibility_status_from(local_trusted, &daemon_status))
 }
 
 #[tauri::command]
-pub async fn request_accessibility(app: AppHandle) -> Result<bool, String> {
-    let local_trusted = is_accessibility_trusted() || request_local_accessibility();
-    let status = daemon_request(Method::POST, "/capture/accessibility/request", None).await?;
-    let local_trusted = local_trusted || is_accessibility_trusted();
-    if local_trusted {
-        let _ = crate::inline::ensure_modifier_monitor(&app);
+pub async fn accessibility_trusted(app: AppHandle) -> bool {
+    accessibility_status(app)
+        .await
+        .is_ok_and(|status| status.ready)
+}
+
+#[tauri::command]
+pub async fn request_accessibility(app: AppHandle) -> Result<AccessibilityStatus, String> {
+    let mut local_trusted = is_accessibility_trusted();
+    if !local_trusted {
+        let _ = request_local_accessibility();
+        local_trusted = is_accessibility_trusted();
+        let daemon_status = daemon_request(Method::GET, "/capture/accessibility", None).await?;
+        return Ok(accessibility_status_from(local_trusted, &daemon_status));
     }
-    Ok(accessibility_clients_ready(local_trusted, &status))
+
+    let daemon_status = daemon_request(Method::GET, "/capture/accessibility", None).await?;
+    let daemon_status = if daemon_status.get("trusted").and_then(Value::as_bool) == Some(true) {
+        daemon_status
+    } else {
+        reveal_capture_service_for_accessibility()?;
+        daemon_status
+    };
+    let _ = crate::inline::ensure_modifier_monitor(&app);
+    Ok(accessibility_status_from(local_trusted, &daemon_status))
 }
 
 fn capture_accessibility_ready(status: &Value) -> bool {
@@ -944,6 +1030,40 @@ fn onboarding_resume_ready(local_trusted: bool, status: &Value) -> bool {
 #[tauri::command]
 pub fn open_accessibility_settings() -> Result<(), String> {
     open_privacy_pane("Privacy_Accessibility")
+}
+
+fn capture_service_executable_for_app(executable: &Path) -> Result<std::path::PathBuf, String> {
+    let directory = executable
+        .parent()
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| "could not resolve woof’s application directory".to_string())?;
+    let capture_service = directory.join("woof_d");
+    let metadata = std::fs::symlink_metadata(&capture_service)
+        .map_err(|_| "the bundled woof capture service is unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("the bundled woof capture service is invalid".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err("the bundled woof capture service is not executable".into());
+        }
+    }
+    Ok(capture_service)
+}
+
+fn reveal_capture_service_for_accessibility() -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|_| "could not resolve woof’s application executable".to_string())?;
+    let capture_service = capture_service_executable_for_app(&executable)?;
+    open_privacy_pane("Privacy_Accessibility")?;
+    Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(capture_service)
+        .spawn()
+        .map(|_| ())
+        .map_err(|_| "could not reveal the woof capture service in Finder".to_string())
 }
 
 #[tauri::command]
@@ -1046,17 +1166,25 @@ pub fn companion_chat_set_position(
 }
 
 #[tauri::command]
-pub fn companion_chat_set_state(app: AppHandle, state: String) -> Result<(), String> {
-    set_companion_mode(&app, &state, true)
+pub fn companion_chat_set_state(
+    app: AppHandle,
+    state: String,
+    request_id: Option<u64>,
+) -> Result<(), String> {
+    set_companion_mode_with_request(&app, &state, true, request_id)
 }
 
 #[tauri::command]
-pub fn companion_chat_open_focused(app: AppHandle) -> Result<(), String> {
-    open_companion_focused(&app)
+pub fn companion_chat_open_focused(app: AppHandle, request_id: Option<u64>) -> Result<(), String> {
+    open_companion_focused_with_request(&app, request_id)
 }
 
 #[tauri::command]
-pub fn companion_chat_rollup(app: AppHandle, duration_ms: Option<u64>) -> Result<(), String> {
+pub fn companion_chat_rollup(
+    app: AppHandle,
+    duration_ms: Option<u64>,
+    request_id: Option<u64>,
+) -> Result<(), String> {
     let companion = webview(&app, COMPANION_WINDOW_LABEL)?;
     let dock = app.state::<UiState>().read()?.companion_position;
     companion_panel::set_mode_timed_at(
@@ -1065,9 +1193,13 @@ pub fn companion_chat_rollup(app: AppHandle, duration_ms: Option<u64>) -> Result
         dock,
         duration_ms.map(|milliseconds| milliseconds as f64 / 1_000.0),
     )?;
-    companion
-        .emit("woof:chat-state", "collapsed")
-        .map_err(|_| "could not update the companion".to_string())
+    emit_companion_state(&companion, "collapsed", request_id)
+}
+
+#[tauri::command]
+pub fn companion_chat_pointer_ready(app: AppHandle) -> Result<(), String> {
+    let companion = webview(&app, COMPANION_WINDOW_LABEL)?;
+    companion_panel::publish_pointer_snapshot(&companion)
 }
 
 #[tauri::command]
@@ -1077,10 +1209,19 @@ pub fn companion_chat_get_hover_open(state: State<'_, UiState>) -> Result<bool, 
 
 #[tauri::command]
 pub fn companion_chat_set_hover_open(
+    app: AppHandle,
     state: State<'_, UiState>,
     enabled: bool,
 ) -> Result<bool, String> {
-    state.update(|preferences| preferences.companion_hover_open = enabled)?;
+    state.update(|preferences| {
+        preferences.companion_hover_open = enabled;
+        preferences.companion_hover_open_configured = true;
+    })?;
+    app.emit(
+        "woof:preferences-changed",
+        json!({"companionHoverOpen": enabled}),
+    )
+    .map_err(|_| "could not publish companion preferences".to_string())?;
     Ok(enabled)
 }
 
@@ -1091,11 +1232,16 @@ pub fn companion_chat_get_collapsed_auto_hide(state: State<'_, UiState>) -> Resu
 
 #[tauri::command]
 pub fn companion_chat_set_collapsed_auto_hide(
+    app: AppHandle,
     state: State<'_, UiState>,
     enabled: bool,
 ) -> Result<(), String> {
     state.update(|preferences| preferences.collapsed_auto_hide = enabled)?;
-    Ok(())
+    app.emit(
+        "woof:preferences-changed",
+        json!({"collapsedAutoHide": enabled}),
+    )
+    .map_err(|_| "could not publish companion preferences".to_string())
 }
 
 #[tauri::command]
@@ -3338,6 +3484,30 @@ mod tests {
             "operational": true,
             "ready": true
         });
+        assert_eq!(
+            accessibility_status_from(false, &daemon_ready),
+            AccessibilityStatus {
+                app_trusted: false,
+                capture_service_trusted: true,
+                capture_service_operational: true,
+                ready: false,
+                next_request: Some("app"),
+            }
+        );
+        assert_eq!(
+            accessibility_status_from(
+                true,
+                &json!({"trusted": false, "operational": false, "ready": false}),
+            ),
+            AccessibilityStatus {
+                app_trusted: true,
+                capture_service_trusted: false,
+                capture_service_operational: false,
+                ready: false,
+                next_request: Some("capture-service"),
+            }
+        );
+        assert!(accessibility_status_from(true, &daemon_ready).ready);
         assert!(accessibility_clients_ready(true, &daemon_ready));
         assert!(!accessibility_clients_ready(false, &daemon_ready));
 
@@ -3504,6 +3674,38 @@ mod tests {
             },
         ])
         .is_err());
+    }
+
+    #[test]
+    fn capture_service_reveal_resolves_only_the_bundled_executable() {
+        use std::fs;
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "woof-capture-service-reveal-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let executable = directory.join("woof");
+        let capture_service = directory.join("woof_d");
+        fs::write(&executable, b"app").unwrap();
+        fs::write(&capture_service, b"capture-service").unwrap();
+        #[cfg(unix)]
+        fs::set_permissions(&capture_service, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            capture_service_executable_for_app(&executable).unwrap(),
+            capture_service
+        );
+
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&capture_service, fs::Permissions::from_mode(0o600)).unwrap();
+            assert!(capture_service_executable_for_app(&executable).is_err());
+        }
+        let _ = fs::remove_dir_all(directory);
     }
 
     #[test]

@@ -86,6 +86,8 @@ pub struct Preferences {
     pub secondary_shortcut: ShortcutChord,
     pub companion_position: DockPosition,
     pub companion_hover_open: bool,
+    #[serde(default)]
+    pub companion_hover_open_configured: bool,
     pub collapsed_auto_hide: bool,
 }
 
@@ -107,7 +109,8 @@ impl Default for Preferences {
             secondary_shortcut_enabled: true,
             secondary_shortcut: ShortcutChord::default(),
             companion_position: DockPosition::Top,
-            companion_hover_open: false,
+            companion_hover_open: true,
+            companion_hover_open_configured: true,
             collapsed_auto_hide: false,
         }
     }
@@ -123,6 +126,19 @@ impl Preferences {
         } else {
             ModifierKey::Fn
         };
+        true
+    }
+
+    fn migrate_companion_hover_default(&mut self) -> bool {
+        if self.companion_hover_open_configured {
+            return false;
+        }
+        // Older builds persisted `false` as an implicit product default and
+        // had no marker that could distinguish it from an explicit opt-out.
+        // Adopt the new hover-first behavior once; every subsequent settings
+        // write carries the marker and preserves an explicit `false`.
+        self.companion_hover_open = true;
+        self.companion_hover_open_configured = true;
         true
     }
 }
@@ -259,7 +275,9 @@ fn read_private_preferences(path: &Path) -> Result<Option<Preferences>, String> 
     }
     let mut preferences: Preferences = serde_json::from_slice(&bytes)
         .map_err(|_| "private preferences are invalid".to_string())?;
-    if preferences.repair_modifier_collision() {
+    let repaired_modifiers = preferences.repair_modifier_collision();
+    let migrated_hover_default = preferences.migrate_companion_hover_default();
+    if repaired_modifiers || migrated_hover_default {
         write_private_json(path, &preferences)?;
     }
     Ok(Some(preferences))
@@ -321,6 +339,35 @@ mod tests {
         assert_eq!(encoded["woof_modifier_key"], "right_option");
         assert_eq!(encoded["transcription_modifier_key"], "fn");
         assert_eq!(encoded["companion_position"], "top");
+        assert_eq!(encoded["companion_hover_open"], true);
+        assert_eq!(encoded["companion_hover_open_configured"], true);
+    }
+
+    #[test]
+    fn private_preferences_migrate_the_legacy_hover_default_only_once() {
+        let directory =
+            std::env::temp_dir().join(format!("woof-ui-hover-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("ui.json");
+        let mut legacy = serde_json::to_value(Preferences::default()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("companion_hover_open_configured");
+        legacy["companion_hover_open"] = serde_json::json!(false);
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let migrated = read_private_preferences(&path).unwrap().unwrap();
+        assert!(migrated.companion_hover_open);
+        assert!(migrated.companion_hover_open_configured);
+
+        let mut explicit_opt_out = migrated;
+        explicit_opt_out.companion_hover_open = false;
+        write_private_json(&path, &explicit_opt_out).unwrap();
+        let reloaded = read_private_preferences(&path).unwrap().unwrap();
+        assert!(!reloaded.companion_hover_open);
+        assert!(reloaded.companion_hover_open_configured);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

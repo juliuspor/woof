@@ -49,10 +49,12 @@ objc2-app-kit = { version = "0.3.2", features = [
   "NSAnimation",
   "NSAnimationContext",
   "NSColor",
+  "NSEvent",
   "NSPanel",
   "NSRunningApplication",
   "NSScreen",
   "NSSound",
+  "NSTrackingArea",
   "NSVisualEffectView",
   "NSWindow",
 ] }

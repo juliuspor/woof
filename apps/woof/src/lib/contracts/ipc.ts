@@ -9,6 +9,7 @@ export const COMMANDS = {
   loadContactInfo: "load_contact_info",
 
   // Permissions.
+  accessibilityStatus: "accessibility_status",
   accessibilityTrusted: "accessibility_trusted",
   requestAccessibility: "request_accessibility",
   microphoneStatus: "microphone_status",
@@ -26,6 +27,7 @@ export const COMMANDS = {
   companionGetCollapsedAutoHide: "companion_chat_get_collapsed_auto_hide",
   companionSetCollapsedAutoHide: "companion_chat_set_collapsed_auto_hide",
   companionOpenFocused: "companion_chat_open_focused",
+  companionPointerReady: "companion_chat_pointer_ready",
   companionRollup: "companion_chat_rollup",
   companionDragStart: "companion_chat_drag_start",
   companionDragFrame: "companion_chat_drag_frame",
@@ -145,6 +147,7 @@ export const EVENTS = {
   chatState: "woof:chat-state",
   chatDelta: "woof:chat-delta",
   chatComplete: "woof:chat-complete",
+  companionPointer: "woof:companion-pointer",
   panelPosition: "woof:panel-position",
   positionDrag: "woof:position-drag",
   openChat: "woof:open-chat",
@@ -175,7 +178,9 @@ export const EVENTS = {
 export type EventName = (typeof EVENTS)[keyof typeof EVENTS];
 
 export type CompanionMode = "hidden" | "collapsed" | "expanded";
-export type NativeChatState = CompanionMode;
+export type NativeChatState =
+  | CompanionMode
+  | { state: CompanionMode; requestId?: number };
 export type MemoryHubRoute = "followups" | "workflows";
 
 export interface MemoryHubNavigatePayload {
@@ -198,6 +203,16 @@ export interface HealthChangedPayload {
 export interface PreferencesChangedPayload {
   reduceVisualEffects?: boolean;
   caretSoundsEnabled?: boolean;
+  companionHoverOpen?: boolean;
+  collapsedAutoHide?: boolean;
+}
+
+export interface AccessibilityStatus {
+  app_trusted: boolean;
+  capture_service_trusted: boolean;
+  capture_service_operational: boolean;
+  ready: boolean;
+  next_request: "app" | "capture-service" | null;
 }
 
 export interface OpenChatPayload {
@@ -244,7 +259,7 @@ export interface TranscriptionProcessingPayload {
 }
 
 export function companionModeFromState(state: NativeChatState): CompanionMode {
-  return state;
+  return typeof state === "string" ? state : state.state;
 }
 
 export function transcriptionLevelFromPayload(

@@ -153,6 +153,14 @@ fn configure_windows(app: &tauri::AppHandle) {
         let _ = caret.set_ignore_cursor_events(false);
     }
 
+    if let Some(memory_hub) = app.get_webview_window("memory-hub") {
+        // Tao creates undecorated macOS windows without the native closable
+        // style bit. Reapply it after construction so the standard Close
+        // Window menu item and Command-W deliver CloseRequested; the handler
+        // below then hides this persistent window instead of destroying it.
+        let _ = memory_hub.set_closable(true);
+    }
+
     if let Some(companion) = app.get_webview_window(companion_panel::WINDOW_LABEL) {
         let dock = app
             .state::<UiState>()
@@ -160,6 +168,7 @@ fn configure_windows(app: &tauri::AppHandle) {
             .map(|preferences| preferences.companion_position)
             .unwrap_or_default();
         let _ = companion_panel::configure_at(&companion, dock);
+        let _ = companion_panel::install_hover_tracking(&companion);
     }
 }
 
@@ -242,6 +251,7 @@ pub fn run() {
             commands::open_onboarding_window_cmd,
             commands::save_contact_info,
             commands::load_contact_info,
+            commands::accessibility_status,
             commands::accessibility_trusted,
             commands::request_accessibility,
             commands::open_accessibility_settings,
@@ -254,6 +264,7 @@ pub fn run() {
             commands::companion_chat_set_state,
             commands::companion_chat_open_focused,
             commands::companion_chat_rollup,
+            commands::companion_chat_pointer_ready,
             commands::companion_chat_get_hover_open,
             commands::companion_chat_set_hover_open,
             commands::companion_chat_get_collapsed_auto_hide,
@@ -335,6 +346,9 @@ pub fn run() {
             commands::daemon_health,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
             install_deep_link_handler(app.handle());
             install_tray(app.handle())?;
             configure_windows(app.handle());
